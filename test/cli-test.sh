@@ -214,6 +214,38 @@ expect "removing a profile drops it from the list" "0" \
 expect "the selection moves off the removed profile" "1" \
   "$(status_field '.selected' | grep -cv '^berlin$')"
 
+# --- PATH ----------------------------------------------------------------
+
+# The widget calls `link --quiet` at startup, so this has to be a no-op when
+# there is nothing to do and must never clobber a real file.
+LINK_HOME="$WORK/linkhome"
+LINK="$LINK_HOME/.local/bin/omarchy-amnezia"
+CLI_REAL="$(readlink -f "$CLI")"
+
+expect "link puts the CLI on PATH" "$CLI_REAL" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link >/dev/null && readlink -f "$LINK")"
+expect "linking twice changes nothing" "already on PATH: $LINK" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link)"
+
+ln -sfn /nowhere/omarchy-amnezia "$LINK"
+expect "a dangling link is repointed" "$CLI_REAL" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link >/dev/null && readlink -f "$LINK")"
+
+rm -f "$LINK"
+printf '#!/bin/sh\n' >"$LINK"
+OUT="$(HOME="$LINK_HOME" bash "$CLI" link 2>&1)"
+expect "a real file in the way is refused, not overwritten" "1" \
+  "$(grep -c 'is not a symlink' <<<"$OUT")"
+expect "and stays untouched" "#!/bin/sh" "$(cat "$LINK")"
+expect "quiet mode says nothing about it" "" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link --quiet 2>&1)"
+
+rm -f "$LINK"
+HOME="$LINK_HOME" bash "$CLI" link >/dev/null
+expect "unlink removes it" "removed $LINK" "$(HOME="$LINK_HOME" bash "$CLI" unlink)"
+expect "unlink is quiet when there is nothing there" "nothing to remove" \
+  "$(HOME="$LINK_HOME" bash "$CLI" unlink)"
+
 # --- names ---------------------------------------------------------------
 
 expect "rejects a name awg-quick could not use as an interface" "1" \

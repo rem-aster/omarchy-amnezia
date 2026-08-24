@@ -380,7 +380,62 @@ is_connected() {
   fi
 }
 
+# `omarchy plugin add` only clones files — it runs no install hooks — so the
+# CLI has to put itself on PATH. ~/.local/bin is already on PATH in Omarchy's
+# own bash env, and a symlink there is one file the user can delete.
+cli_link_path() {
+  printf '%s/.local/bin/%s\n' "$HOME" "$PROGRAM"
+}
+
+on_path() {
+  [[ "$(command -v -- "$PROGRAM" 2>/dev/null)" != "" ]]
+}
+
 # ------------------------------------------------------------------ commands
+
+# Called by hand, and once by the widget at startup with --quiet, where a
+# failure must stay silent: not being on PATH is an inconvenience, not a
+# reason to make the bar complain.
+cmd_link() {
+  local quiet=0
+  [[ ${1:-} == --quiet ]] && quiet=1
+
+  local target link dir
+  target="$SELF_DIR/$PROGRAM"
+  link="$(cli_link_path)"
+  dir="${link%/*}"
+
+  [[ -f $target ]] || { ((quiet)) && return 0; die "cannot find myself at $target"; }
+
+  if [[ -L $link ]]; then
+    if [[ "$(readlink -f -- "$link" 2>/dev/null)" == "$(readlink -f -- "$target" 2>/dev/null)" ]]; then
+      ((quiet)) || echo "already on PATH: $link"
+      return 0
+    fi
+    # A link from an older checkout, or one left dangling by a reinstall:
+    # it carries our name, so point it at this copy.
+  elif [[ -e $link ]]; then
+    ((quiet)) && return 0
+    die "$link exists and is not a symlink — remove it, or put $SELF_DIR on PATH yourself"
+  fi
+
+  mkdir -p -- "$dir" 2>/dev/null || { ((quiet)) && return 0; die "could not create $dir"; }
+  ln -sfn -- "$target" "$link" 2>/dev/null || { ((quiet)) && return 0; die "could not create $link"; }
+  ((quiet)) || echo "linked $link -> $target"
+}
+
+cmd_unlink() {
+  local link
+  link="$(cli_link_path)"
+  if [[ -L $link ]]; then
+    rm -f -- "$link"
+    echo "removed $link"
+  elif [[ -e $link ]]; then
+    die "$link is not a symlink — leaving it alone"
+  else
+    echo "nothing to remove"
+  fi
+}
 
 cmd_list() {
   if [[ ${1:-} == --json ]]; then
@@ -696,6 +751,13 @@ cmd_doctor() {
   note() {
     printf '  · %s\n' "$1"
   }
+  path_check() {
+    if on_path; then
+      check ok "on PATH as $PROGRAM"
+    else
+      note "not on PATH — run '$SELF_DIR/$PROGRAM link'"
+    fi
+  }
   echo "Amnezia plugin checks"
   printf '  backend: %s\n' "$BACKEND"
 
@@ -706,6 +768,7 @@ cmd_doctor() {
     note "awg-quick, the amneziawg module and resolvconf are not used in this mode"
     note "the service does its own DNS and routing, and asks for no password"
     have jq && check ok "jq" || check no "jq missing"
+    path_check
     printf '  profiles: %s\n' "$(profile_names | wc -l)"
     printf '  directory: %s\n' "$PROFILE_DIR"
     return $ok
@@ -741,6 +804,7 @@ cmd_doctor() {
   else
     check no "no pkexec and no sudo — connecting needs root"
   fi
+  path_check
   printf '  profiles: %s\n' "$(profile_names | wc -l)"
   printf '  directory: %s\n' "$PROFILE_DIR"
   return $ok
@@ -778,13 +842,15 @@ Usage: $PROGRAM <command> [args]
   down [name]               disconnect (defaults to whatever is connected)
   toggle [name]             connect if off, disconnect if on
   select <name>             make this the profile the switch acts on
-  import <src> [--name N]   import a .conf, an Amnezia .vpn/.json, or a vpn:// key
-                            (src may be - to read stdin)
+  import <file> [--name N]  import a .conf saved by the Amnezia app
+                            (an exported .vpn/.json also works; - reads stdin)
   remove <name>             delete a profile
   rename <old> <new>        rename a profile
   edit [name]               open a profile in \$EDITOR
   backend [auto|daemon|quick]
                             show or set how tunnels are raised
+  link                      symlink this CLI into ~/.local/bin (on PATH)
+  unlink                    remove that symlink
   doctor                    check the tools this plugin needs
 
 Profiles live in $PROFILE_DIR
@@ -823,6 +889,8 @@ main() {
     rename|mv) cmd_rename "$@" ;;
     edit) cmd_edit "$@" ;;
     backend) cmd_backend "$@" ;;
+    link) cmd_link "$@" ;;
+    unlink) cmd_unlink ;;
     doctor|check) cmd_doctor ;;
     -h|--help|help) usage ;;
     *) usage >&2; die "unknown command: $command" ;;

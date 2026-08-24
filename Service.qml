@@ -136,6 +136,21 @@ Item {
     if (pendingSelection !== "" && parsed.selected === pendingSelection) pendingSelection = ""
   }
 
+  // `omarchy plugin add` clones files and runs nothing, so the CLI would sit
+  // in the plugin directory off PATH and every terminal instruction would have
+  // to spell out a path. Link it once, quietly: it is a no-op when the link is
+  // already right, and it never overwrites a real file.
+  Component.onCompleted: if (cliPath !== "") {
+    linkProcess.command = ["bash", cliPath, "link", "--quiet"]
+    linkProcess.running = true
+  }
+
+  Process {
+    id: linkProcess
+    running: false
+    command: []
+  }
+
   Timer {
     id: refreshTimer
     interval: root.refreshIntervalSec * 1000
