@@ -52,3 +52,5 @@ rm -rf ~/.config/omarchy/amnezia      # your configs, only if you want them gone
 Configs hold private keys and are kept at mode `600` in a `700` directory. `awg-quick` runs a config's `PreUp`/`PostUp` hooks as root, so read a config you did not write before adding it. The Amnezia app's service, where it is used, accepts commands from any local process — that is what makes it prompt-free, and `./scripts/amnezia backend quick` opts out of it. No kill switch either way.
 
 Beyond bash and coreutils the plugin ships nothing and bundles nothing: it calls the [Amnezia service](https://github.com/amnezia-vpn/amnezia-client) or [amneziawg-tools](https://github.com/amnezia-vpn/amneziawg-tools) / `wireguard-tools` through `pkexec`, and `openresolv` when a config sets `DNS`.
+
+MIT license
