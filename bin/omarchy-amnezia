@@ -33,7 +33,14 @@ CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 AMNEZIA_DIR="${OMARCHY_AMNEZIA_DIR:-$CONFIG_HOME/omarchy/amnezia}"
 PROFILE_DIR="$AMNEZIA_DIR/configs"
 STATE_FILE="$AMNEZIA_DIR/state.json"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-amnezia"
+# Runtime state records which profile is up. With no XDG_RUNTIME_DIR the
+# fallback has to be per-uid and owner-only: a shared /tmp path would let any
+# local user plant that record.
+if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then
+  RUNTIME_DIR="$XDG_RUNTIME_DIR/omarchy-amnezia"
+else
+  RUNTIME_DIR="/tmp/omarchy-amnezia-$(id -u)"
+fi
 
 # awg-quick names the interface after the config file, and only accepts these.
 NAME_PATTERN='^[a-zA-Z0-9_=+.-]{1,15}$'
@@ -46,7 +53,7 @@ die() {
 ensure_dirs() {
   mkdir -p -- "$PROFILE_DIR" || die "could not create $PROFILE_DIR"
   chmod 700 -- "$AMNEZIA_DIR" "$PROFILE_DIR" 2>/dev/null
-  mkdir -p -- "$RUNTIME_DIR" 2>/dev/null
+  mkdir -p -- "$RUNTIME_DIR" 2>/dev/null && chmod 700 -- "$RUNTIME_DIR" 2>/dev/null
 }
 
 valid_name() {
@@ -344,6 +351,9 @@ daemon_active_name() {
   local recorded name device
   device="$(strip_mask "$DAEMON_DEVICE_IP")"
   recorded="$(cat "$(active_file)" 2>/dev/null)"
+  # The record is ours, but it is a file on disk: hold it to the same rule as
+  # an argument before it reaches profile_path.
+  valid_name "$recorded" || recorded=""
   if [[ -n $recorded ]] && profile_exists "$recorded"; then
     if [[ -z $device || $(strip_mask "$(profile_address "$recorded")") == "$device" ]]; then
       printf '%s\n' "$recorded"
@@ -493,6 +503,9 @@ cmd_status() {
   fi
   if [[ -n $active && -f $(since_file "$active") ]]; then
     since="$(cat "$(since_file "$active")" 2>/dev/null)"
+    # `status --json` is what the panel parses; a stamp that is not a number
+    # would take the whole answer down with it.
+    [[ $since =~ ^[0-9]+$ ]] || since=0
   fi
   protocol=""
   path="$(profile_path "${selected:-}")"

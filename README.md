@@ -91,21 +91,44 @@ omarchy-shell amnezia vpnUp berlin    # connect a named config
 omarchy-shell amnezia vpnDown
 ```
 
-## What you need installed
+## Remove it
 
-**If the Amnezia app is installed, nothing.** The plugin drives the service the
-app's installer already set up, which asks for no password and brings its own
-tunnel binary.
+```bash
+omarchy-amnezia down                 # if a tunnel is up
+omarchy-amnezia unlink               # the ~/.local/bin symlink
+omarchy plugin disable io.github.rem-aster.amnezia
+omarchy plugin remove io.github.rem-aster.amnezia
+rm -rf ~/.config/omarchy/amnezia     # your configs — only if you want them gone
+```
 
-**Otherwise** the plugin raises the tunnel itself and needs the tools:
+Those are everything the plugin creates: the plugin checkout, one symlink, and
+its own directory under `~/.config/omarchy`. It never edits your `shell.json`
+by itself (enabling and placing the widget is `omarchy plugin` / `omarchy bar`
+doing that), and it writes nothing else outside those paths.
+
+## Dependencies
+
+The plugin bundles no third-party code and no binaries. It calls what is on the
+machine:
+
+| | | |
+| --- | --- | --- |
+| `bash`, `jq`, `python3` | required | ship with Omarchy |
+| the Amnezia app's service | one of these two | [GPL-3.0](https://github.com/amnezia-vpn/amnezia-client) — used over its local socket, nothing installed by us |
+| `amneziawg-tools` (+ `amneziawg-dkms`), or `wireguard-tools` | | [GPL-2.0](https://github.com/amnezia-vpn/amneziawg-tools) — `awg-quick` / `wg-quick` |
+| `polkit` | with the tools above | for the `pkexec` prompt |
+| `openresolv` or `systemd-resolvconf` | with the tools above | only for a config with a `DNS =` line |
+
+So: **if the Amnezia app is installed, nothing to install.** The plugin drives
+the service its installer already set up, which asks for no password and brings
+its own tunnel binary. Otherwise:
 
 ```bash
 yay -S amneziawg-tools amneziawg-dkms   # AmneziaWG configs
 sudo pacman -S wireguard-tools          # plain WireGuard configs
 ```
 
-In that mode each connect and disconnect shows one polkit password dialog, and a
-config with a `DNS =` line also needs `openresolv` or `systemd-resolvconf`.
+and each connect or disconnect shows one polkit password dialog.
 
 `omarchy-amnezia doctor` says which mode is in force and what is missing.
 
