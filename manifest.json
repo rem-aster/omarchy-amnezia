@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.rem-aster.amnezia",
+  "name": "Amnezia",
+  "version": "1.0.0",
+  "author": "rem-aster",
+  "license": "MIT",
+  "description": "Turn an Amnezia (AmneziaWG/WireGuard) config on or off and switch between configs from the Omarchy bar.",
+  "homepage": "https://github.com/rem-aster/omarchy-amnezia",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Amnezia",
+    "description": "Connect or disconnect an Amnezia VPN config, and pick which config the switch acts on.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 15,
+      "switchWhenConnected": "On"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 600,
+        "step": 1,
+        "defaultValue": 15,
+        "description": "How often the panel re-reads the tunnel state and transfer counters."
+      },
+      {
+        "key": "switchWhenConnected",
+        "type": "enum",
+        "label": "Switch on pick",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On",
+        "description": "When On, picking another config while connected moves the tunnel to it right away. When Off, picking only changes what the switch will connect next."
+      }
+    ]
+  }
+}
