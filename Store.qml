@@ -172,7 +172,31 @@ Item {
     removeProcess.running = true
   }
 
+  // ------------------------------------------------------------- upgrading
+  //
+  // An earlier version of this plugin shipped a CLI and symlinked it into
+  // ~/.local/bin. The CLI is gone, so that link now points at nothing and
+  // anything still calling it fails with "No such file or directory". Clean up
+  // after ourselves once, and only ever a dangling link of our own making.
+  function tidyOldLink() {
+    tidyProcess.running = true
+  }
+
   // --------------------------------------------------------------- plumbing
+
+  Process {
+    id: tidyProcess
+    running: false
+    command: ["bash", "-c", [
+      'link="$HOME/.local/bin/omarchy-amnezia"',
+      '# Only a symlink, only a broken one, and only one aimed at this plugin.',
+      '[ -L "$link" ] || exit 0',
+      '[ -e "$link" ] && exit 0',
+      'case "$(readlink -- "$link")" in',
+      '  */plugins/io.github.rem-aster.amnezia/bin/omarchy-amnezia) rm -f -- "$link" ;;',
+      'esac'
+    ].join("\n")]
+  }
 
   FileView {
     id: stateFile

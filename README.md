@@ -38,6 +38,21 @@ plugin directory — no commands on your `PATH`, no helper binaries, no services
 Plugins run unsandboxed inside `omarchy-shell`, so read the code before enabling
 one.
 
+### Upgrading from a version with the `omarchy-amnezia` command
+
+Earlier versions shipped a CLI and symlinked it into `~/.local/bin`. Both are
+gone; everything moved to `omarchy-shell amnezia …` below. After updating,
+reload the shell so it stops running the old widget:
+
+```bash
+omarchy-restart-shell
+```
+
+Without that, the still-loaded old widget keeps calling a script the new
+checkout no longer has and says `bin/omarchy-amnezia: No such file or
+directory`. The stale symlink is removed by the plugin itself on its next
+start — nothing to clean up by hand.
+
 ## 2. Get a config out of the Amnezia app
 
 The app always exports AmneziaWG as a `.conf` file:

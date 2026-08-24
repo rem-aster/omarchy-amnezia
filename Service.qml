@@ -302,6 +302,10 @@ Item {
 
   // --------------------------------------------------------------- plumbing
 
+  Component.onCompleted: {
+    store.tidyOldLink()
+  }
+
   Store {
     id: store
     onChanged: {
