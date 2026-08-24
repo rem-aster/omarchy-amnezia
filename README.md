@@ -32,9 +32,8 @@ omarchy plugin add https://github.com/rem-aster/omarchy-amnezia.git --enable --y
 ```
 
 The widget lands on the right of the bar; `omarchy bar move
-io.github.rem-aster.amnezia` puts it elsewhere. On first run it symlinks its
-`omarchy-amnezia` command into `~/.local/bin`, so the commands below work in any
-terminal.
+io.github.rem-aster.amnezia` puts it elsewhere. Nothing is installed outside the
+plugin directory — no commands on your `PATH`, no helper binaries, no services.
 
 Plugins run unsandboxed inside `omarchy-shell`, so read the code before enabling
 one.
@@ -49,21 +48,23 @@ The app always exports AmneziaWG as a `.conf` file:
 - **Your own server:** open the server → **Sharing** → AmneziaWG. Save the
   `.conf`.
 
-Do not paste a `vpn://` key — those leave the private key blank for the app to
-fill in, so nothing else can use them. The import will tell you as much.
+A `vpn://` key will not work: it leaves the private key blank for the app to
+fill in, so nothing else can use it. The plugin says so if you try.
 
-## 3. Import it
+## 3. Add it
 
 ```bash
-omarchy-amnezia import ~/Downloads/de.conf --name germany
-omarchy-amnezia list
+omarchy-shell amnezia add ~/Downloads/de.conf
+omarchy-shell amnezia list
 ```
 
-`--name` is optional; without it the name comes from the file. It becomes the
-network interface name, so keep it under 16 characters of `a-z A-Z 0-9 _ = + . -`.
+A second argument names it: `add ~/Downloads/de.conf germany`. Otherwise the
+name comes from the file. It becomes the network interface name, so it is cut
+down to 15 characters of `a-z A-Z 0-9 _ = + . -`.
 
-Configs live in `~/.config/omarchy/amnezia/configs/` at mode `600`. Dropping a
-`.conf` in there by hand works too — the panel picks it up on its next refresh.
+Configs are copied to `~/.config/omarchy/amnezia/configs/` at mode `600`. Adding
+a `.conf` to that directory by hand works too — the panel picks it up on its
+next refresh.
 
 ## 4. Use it
 
@@ -83,37 +84,49 @@ Configs live in `~/.config/omarchy/amnezia/configs/` at mode `600`. Dropping a
 
 One tunnel at a time — connecting another config replaces the first.
 
-For a keybind or a script:
+## Commands
+
+Everything the plugin does is reachable through its IPC target, for a keybind, a
+script, or just a terminal:
 
 ```bash
-omarchy-shell amnezia vpnToggle       # connect / disconnect
-omarchy-shell amnezia vpnUp berlin    # connect a named config
-omarchy-shell amnezia vpnDown
+omarchy-shell amnezia status              # what is connected
+omarchy-shell amnezia list                # configs, * marks the live one
+omarchy-shell amnezia add <file> [name]   # import a .conf
+omarchy-shell amnezia remove <name>       # delete a config
+omarchy-shell amnezia select <name>       # choose what the switch uses
+omarchy-shell amnezia up [name]           # connect
+omarchy-shell amnezia down                # disconnect
+omarchy-shell amnezia vpnToggle           # connect if off, disconnect if on
+omarchy-shell amnezia refresh
+omarchy-shell amnezia open / close / toggle    # the panel
 ```
+
+`add`, `up` and `down` answer straight away and do the work in the background;
+the panel shows the result, and a failure also arrives as a notification.
 
 ## Remove it
 
 ```bash
-omarchy-amnezia down                 # if a tunnel is up
-omarchy-amnezia unlink               # the ~/.local/bin symlink
+omarchy-shell amnezia down            # if a tunnel is up
 omarchy plugin disable io.github.rem-aster.amnezia
 omarchy plugin remove io.github.rem-aster.amnezia
-rm -rf ~/.config/omarchy/amnezia     # your configs — only if you want them gone
+rm -rf ~/.config/omarchy/amnezia      # your configs — only if you want them gone
 ```
 
-Those are everything the plugin creates: the plugin checkout, one symlink, and
-its own directory under `~/.config/omarchy`. It never edits your `shell.json`
-by itself (enabling and placing the widget is `omarchy plugin` / `omarchy bar`
-doing that), and it writes nothing else outside those paths.
+That is everything the plugin creates: the plugin checkout and its own directory
+under `~/.config/omarchy`. It never edits your `shell.json` itself (enabling and
+placing the widget is `omarchy plugin` / `omarchy bar` doing that) and writes
+nothing else anywhere.
 
 ## Dependencies
 
-The plugin bundles no third-party code and no binaries. It calls what is on the
+The plugin bundles no code and no binaries of its own. It calls what is on the
 machine:
 
 | | | |
 | --- | --- | --- |
-| `bash`, `jq`, `python3` | required | ship with Omarchy |
+| `bash`, `coreutils` | required | ship with Omarchy |
 | the Amnezia app's service | one of these two | [GPL-3.0](https://github.com/amnezia-vpn/amnezia-client) — used over its local socket, nothing installed by us |
 | `amneziawg-tools` (+ `amneziawg-dkms`), or `wireguard-tools` | | [GPL-2.0](https://github.com/amnezia-vpn/amneziawg-tools) — `awg-quick` / `wg-quick` |
 | `polkit` | with the tools above | for the `pkexec` prompt |
@@ -130,81 +143,62 @@ sudo pacman -S wireguard-tools          # plain WireGuard configs
 
 and each connect or disconnect shows one polkit password dialog.
 
-`omarchy-amnezia doctor` says which mode is in force and what is missing.
-
 ## Settings
 
 On the widget's entry in `~/.config/omarchy/shell.json`:
 
 ```json
-{ "id": "io.github.rem-aster.amnezia", "refreshIntervalSec": 15, "switchWhenConnected": "On" }
+{ "id": "io.github.rem-aster.amnezia", "refreshIntervalSec": 15, "switchWhenConnected": "On", "backend": "auto" }
 ```
 
 - **`refreshIntervalSec`** (15) — how often the panel re-reads the state.
 - **`switchWhenConnected`** (`On`) — whether picking another config while
   connected moves the tunnel right away, or only decides what connects next.
-
-## Commands
-
-```
-omarchy-amnezia status               what is connected
-omarchy-amnezia list                 list configs
-omarchy-amnezia up [name]            connect
-omarchy-amnezia down                 disconnect
-omarchy-amnezia toggle [name]        connect if off, disconnect if on
-omarchy-amnezia select <name>        choose what the switch uses
-omarchy-amnezia import <file>        import a .conf (or an exported .vpn/.json)
-omarchy-amnezia remove <name>        delete a config
-omarchy-amnezia rename <old> <new>   rename a config
-omarchy-amnezia edit [name]          open a config in $EDITOR
-omarchy-amnezia backend [name]       auto | daemon | quick
-omarchy-amnezia link / unlink        the ~/.local/bin symlink
-omarchy-amnezia doctor               check this machine
-```
-
-Add `--json` to `status` and `list` for the data the panel reads.
+- **`backend`** (`auto`) — `auto` uses the AmneziaVPN service when its socket is
+  there and `awg-quick` otherwise. `daemon` and `quick` pin the choice.
 
 ## Good to know
 
-**Two ways to connect, chosen per run.** With the app installed the plugin sends
-one `activate` message to `AmneziaVPN.service`; otherwise it runs one
+**Two ways to connect.** With the app installed the plugin sends one `activate`
+message to `AmneziaVPN.service` over its socket; otherwise it runs one
 `pkexec awg-quick up <config>`. Nothing of the plugin's own runs as root, and it
-installs no helper, sudoers entry or polkit rule. `omarchy-amnezia backend
-daemon|quick` pins the choice.
+installs no helper, sudoers entry or polkit rule. The panel's *Via* row says
+which one is in use.
 
 **The service is shared with the app.** It runs a single interface, so a tunnel
-you started from the app shows up in the panel — marked *not imported here* when
-it is a config the plugin does not have — and the switch can still turn it off.
+you started from the app shows up in the panel — the config reads as *not
+imported here* when it is one the plugin does not have — and the switch can
+still turn it off.
 
-**Security.** A `.conf` holds your private key; configs stay at mode `600` in a
-`700` directory. `awg-quick` runs a config's `PreUp`/`PostUp` hooks as root, so
-read a config you did not write before importing it (`omarchy-amnezia edit`).
-The app's service, when installed, listens on a socket any local process can
-command and checks nothing about the caller — that is what makes it
-prompt-free, it predates this plugin, and `backend quick` opts out of using it.
-There is no kill switch either way.
+**Security.** A `.conf` holds your private key; configs are written at mode
+`600` in a `700` directory. `awg-quick` runs a config's `PreUp`/`PostUp` hooks
+as root, so read a config you did not write before adding it. The app's service,
+when installed, listens on a socket any local process can command and checks
+nothing about the caller — that is what makes it prompt-free, it predates this
+plugin, and `backend: quick` opts out of using it. There is no kill switch
+either way.
 
 ## Troubleshooting
 
-**"This is an Amnezia subscription key"** — you pasted a `vpn://` key. Export a
+**"That is an Amnezia subscription key"** — you passed a `vpn://` key. Export a
 `.conf` from the app instead, per step 2.
 
 **"the AmneziaVPN service is not running"** — the app was removed or its service
 stopped. `systemctl start AmneziaVPN`, or install the tools above and let the
-plugin do it itself.
+plugin raise the tunnel itself.
 
 **"the AmneziaVPN service rejected the config"** — the service validates the
 config and does not say which field it disliked; `/var/log/AmneziaVPN` does. An
 `Endpoint` hostname that no longer resolves is the usual cause.
 
-**`resolvconf: command not found`** — install `openresolv`, or drop the `DNS`
-line with `omarchy-amnezia edit <name>`.
+**"Authorization cancelled"** — the polkit dialog was dismissed. Only the
+awg-quick path asks at all.
+
+**`resolvconf: command not found`** — install `openresolv`, or delete the `DNS`
+line from the config.
 
 **`Protocol not supported`** — `awg-quick` is installed but the AmneziaWG kernel
 module is not. Install `amneziawg-dkms` and reboot.
-
-**A config will not connect** — run `omarchy-amnezia up <name>` in a terminal;
-the underlying tool prints what it refused.
 
 ## Credits
 

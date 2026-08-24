@@ -24,16 +24,8 @@ Panel {
   readonly property string connectGlyph: "󰐊"
   readonly property string disconnectGlyph: "󰏤"
 
-  // The CLI ships next to this file, so the widget works from wherever the
-  // plugin was cloned to without a PATH entry or a hardcoded plugin id.
-  readonly property string cliPath: {
-    var url = String(Qt.resolvedUrl("bin/omarchy-amnezia"))
-    if (url.indexOf("file://") === 0) url = url.substring(7)
-    return decodeURIComponent(url)
-  }
-
   property string focusSection: "header"
-  property int profileIndex: 0
+  property int configIndex: 0
   property bool cursorActive: false
   property double nowMs: Date.now()
 
@@ -44,26 +36,26 @@ Panel {
   readonly property color hoverFill: Style.hoverFillFor(foreground, Color.accent)
   readonly property color selectedFill: Style.selectedFillFor(foreground, Color.accent)
 
-  readonly property var activeEntry: amnezia.profileByName(amnezia.activeProfile)
-  readonly property var selectedEntry: amnezia.profileByName(amnezia.selected)
-  readonly property var shownEntry: activeEntry || selectedEntry
+  readonly property var activeConfig: amnezia.activeConfig
+  readonly property var selectedConfig: amnezia.configFor(amnezia.selected)
+  readonly property var shownConfig: activeConfig || selectedConfig
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
-    && (amnezia.hasProfiles || amnezia.connected)
+    && (amnezia.hasConfigs || amnezia.connected)
   readonly property string toggleHint: amnezia.connected
-    ? "Disconnect " + (amnezia.activeProfile !== "" ? amnezia.activeProfile : "the tunnel")
+    ? "Disconnect " + (amnezia.activeName !== "" ? amnezia.activeName : "the tunnel")
     : (amnezia.selected === "" ? "No config to connect" : "Connect " + amnezia.selected)
   readonly property string barTooltip: amnezia.connected
-    ? "Amnezia: " + (amnezia.activeProfile !== "" ? amnezia.activeProfile : "connected")
+    ? "Amnezia: " + (amnezia.activeName !== "" ? amnezia.activeName : "connected")
     : "Amnezia: off"
 
   function ensureCursor() {
-    if (!amnezia.hasProfiles) {
+    if (!amnezia.hasConfigs) {
       focusSection = "header"
-      profileIndex = 0
+      configIndex = 0
       return
     }
-    if (focusSection !== "header" && focusSection !== "profiles") focusSection = "profiles"
-    profileIndex = Math.max(0, Math.min(amnezia.profiles.length - 1, profileIndex))
+    if (focusSection !== "header" && focusSection !== "configs") focusSection = "configs"
+    configIndex = Math.max(0, Math.min(amnezia.configs.length - 1, configIndex))
   }
 
   function moveCursor(dx, dy) {
@@ -71,18 +63,18 @@ Panel {
     ensureCursor()
     if (dy === 0) return
     if (focusSection === "header") {
-      if (dy > 0 && amnezia.hasProfiles) {
-        focusSection = "profiles"
-        profileIndex = 0
+      if (dy > 0 && amnezia.hasConfigs) {
+        focusSection = "configs"
+        configIndex = 0
         scrollCursorIntoView()
       }
       return
     }
-    if (dy < 0 && profileIndex === 0) {
+    if (dy < 0 && configIndex === 0) {
       setHeaderCursor()
       return
     }
-    profileIndex = Math.max(0, Math.min(amnezia.profiles.length - 1, profileIndex + dy))
+    configIndex = Math.max(0, Math.min(amnezia.configs.length - 1, configIndex + dy))
     scrollCursorIntoView()
   }
 
@@ -92,36 +84,36 @@ Panel {
     if (panelFlick) panelFlick.contentY = 0
   }
 
-  function setProfileCursor(index) {
+  function setConfigCursor(index) {
     cursorActive = true
-    focusSection = "profiles"
-    profileIndex = index
+    focusSection = "configs"
+    configIndex = index
     scrollCursorIntoView()
   }
 
-  function currentProfile() {
-    if (!amnezia.hasProfiles) return null
-    return amnezia.profiles[Math.max(0, Math.min(profileIndex, amnezia.profiles.length - 1))]
+  function currentConfig() {
+    if (!amnezia.hasConfigs) return null
+    return amnezia.configs[Math.max(0, Math.min(configIndex, amnezia.configs.length - 1))]
   }
 
   function activateCursor() {
     ensureCursor()
     if (focusSection === "header") toggleConnection()
     else {
-      var profile = currentProfile()
-      if (profile) amnezia.select(String(profile.name))
+      var config = currentConfig()
+      if (config) amnezia.select(String(config.name))
     }
   }
 
   function toggleConnection() {
     if (amnezia.busy) return
-    if (amnezia.hasProfiles || amnezia.connected) amnezia.toggle()
+    if (amnezia.hasConfigs || amnezia.connected) amnezia.toggle()
   }
 
-  function connectProfile(profile) {
-    if (!profile || amnezia.busy) return
-    if (profile.active === true) amnezia.down()
-    else amnezia.up(String(profile.name))
+  function connectConfig(config) {
+    if (!config || amnezia.busy) return
+    if (config.up === true) amnezia.down()
+    else amnezia.up(String(config.name))
   }
 
   function scrollItemIntoView(item) {
@@ -141,9 +133,9 @@ Panel {
   }
 
   function scrollCursorIntoView() {
-    if (focusSection === "profiles" && profileColumn && profileIndex >= 0
-        && profileIndex < profileColumn.children.length) {
-      scrollItemIntoView(profileColumn.children[profileIndex])
+    if (focusSection === "configs" && configColumn && configIndex >= 0
+        && configIndex < configColumn.children.length) {
+      scrollItemIntoView(configColumn.children[configIndex])
     }
   }
 
@@ -161,7 +153,6 @@ Panel {
   Service {
     id: amnezia
     settings: root.settings
-    cliPath: root.cliPath
   }
 
   Connections {
@@ -177,22 +168,39 @@ Panel {
     onTriggered: root.nowMs = Date.now()
   }
 
+  // The plugin's whole command surface. `import` and `delete` are reserved
+  // words in QML, hence `add` and `remove`.
   IpcHandler {
     target: root.ipcTarget
 
     function open(): void { root.open() }
     function close(): void { root.close() }
-    function show(): void { root.open() }
-    function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function refresh(): string { amnezia.refresh(); return "ok" }
-    function vpnUp(name: string): string { amnezia.up(name); return "ok" }
-    function vpnDown(): string { amnezia.down(); return "ok" }
-    function vpnToggle(): string { amnezia.toggle(); return "ok" }
-    function pick(name: string): string { amnezia.select(name); return "ok" }
-    function status(): string {
-      return amnezia.connected ? "connected " + amnezia.activeProfile : "disconnected"
+
+    function add(path: string, name: string): string {
+      if (String(path) === "") return "usage: add <path-to-.conf> [name]"
+      amnezia.importConfig(path, name)
+      return "importing " + path
     }
+
+    function remove(name: string): string {
+      if (String(name) === "") return "usage: remove <name>"
+      amnezia.removeConfig(name)
+      return "ok"
+    }
+
+    function select(name: string): string {
+      if (String(name) === "") return "usage: select <name>"
+      amnezia.select(name)
+      return "ok"
+    }
+
+    function up(name: string): string { amnezia.up(name); return "connecting" }
+    function down(): string { amnezia.down(); return "disconnecting" }
+    function vpnToggle(): string { amnezia.toggle(); return "ok" }
+    function refresh(): string { amnezia.refresh(); return "ok" }
+    function list(): string { return amnezia.listText() }
+    function status(): string { return amnezia.statusText() }
   }
 
   BarIconButton {
@@ -233,7 +241,7 @@ Panel {
         if (text === "t" || text === "T") root.toggleConnection()
         else if (text === "r" || text === "R") amnezia.refresh()
         else if (text === "d" || text === "D") { if (amnezia.connected) amnezia.down() }
-        else if (text === "c" || text === "C") root.connectProfile(root.currentProfile())
+        else if (text === "c" || text === "C") root.connectConfig(root.currentConfig())
       }
 
       Flickable {
@@ -265,8 +273,14 @@ Panel {
               id: hero
               width: parent.width
               title: "Amnezia"
-              meta: Model.heroMeta(amnezia.status, amnezia.busy, amnezia.profiles.length, root.nowMs)
-              detail: root.shownEntry ? Model.protocolLabel(root.shownEntry.protocol) : ""
+              meta: Model.heroMeta({
+                busy: amnezia.busy,
+                connected: amnezia.connected,
+                configCount: amnezia.configs.length,
+                activeName: amnezia.activeName,
+                since: amnezia.since
+              }, root.nowMs)
+              detail: root.shownConfig ? Model.protocolLabel(root.shownConfig.protocol) : ""
               foreground: root.foreground
               fontFamily: root.fontFamily
               iconOpacity: amnezia.connected ? 1.0 : 0.5
@@ -283,8 +297,8 @@ Panel {
               trailingControl: Component {
                 ToggleSwitch {
                   id: powerSwitch
-                  enabled: amnezia.hasProfiles || amnezia.connected
-                  opacity: amnezia.hasProfiles || amnezia.connected ? 1.0 : 0.4
+                  enabled: amnezia.hasConfigs || amnezia.connected
+                  opacity: amnezia.hasConfigs || amnezia.connected ? 1.0 : 0.4
                   checked: amnezia.connected
                   busy: amnezia.busy
                   hasCursor: header.ringVisible
@@ -305,7 +319,7 @@ Panel {
           Text {
             visible: text !== ""
             width: parent.width
-            text: amnezia.lastError !== "" ? amnezia.lastError : amnezia.actionStatus
+            text: amnezia.lastError !== "" ? amnezia.lastError : amnezia.notice
             color: amnezia.lastError !== "" ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -332,36 +346,36 @@ Panel {
               label: "Config"
               // The service will happily be running something the app
               // connected to, which is not one of the configs listed below.
-              value: amnezia.activeProfile !== "" ? amnezia.activeProfile : "not imported here"
+              value: amnezia.activeName !== "" ? amnezia.activeName : "not imported here"
             }
             InfoPair {
               label: "Endpoint"
-              visible: root.activeEntry !== null
-              value: root.activeEntry ? String(root.activeEntry.endpoint || "—") : "—"
+              visible: root.activeConfig !== null
+              value: root.activeConfig ? String(root.activeConfig.endpoint || "—") : "—"
             }
             InfoPair {
               label: "Address"
-              visible: root.activeEntry !== null
-              value: root.activeEntry ? String(root.activeEntry.address || "—") : "—"
+              visible: root.activeConfig !== null
+              value: root.activeConfig ? String(root.activeConfig.address || "—") : "—"
             }
             InfoPair {
               label: "DNS"
-              visible: root.activeEntry !== null && String(root.activeEntry.dns || "") !== ""
-              value: root.activeEntry ? String(root.activeEntry.dns) : ""
+              visible: root.activeConfig !== null && String(root.activeConfig.dns || "") !== ""
+              value: root.activeConfig ? String(root.activeConfig.dns) : ""
             }
             InfoPair {
               label: "Transfer"
-              value: Model.transferText(amnezia.status.rxBytes, amnezia.status.txBytes)
+              value: Model.transferText(amnezia.rxBytes, amnezia.txBytes)
             }
             InfoPair {
               label: "Via"
               visible: value !== ""
-              value: Model.backendLabel(amnezia.tools)
+              value: Model.backendLabel(amnezia.backend)
             }
           }
 
           PanelSeparator {
-            visible: amnezia.hasProfiles
+            visible: amnezia.hasConfigs
             foreground: root.foreground
           }
 
@@ -370,32 +384,32 @@ Panel {
             spacing: Style.space(10)
 
             PanelSectionHeader {
-              visible: amnezia.hasProfiles
+              visible: amnezia.hasConfigs
               text: "CONFIGS"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
             Column {
-              id: profileColumn
-              visible: amnezia.hasProfiles
+              id: configColumn
+              visible: amnezia.hasConfigs
               width: parent.width
               spacing: Style.space(6)
 
               Repeater {
-                model: amnezia.profiles
-                ProfileRow {
+                model: amnezia.configs
+                ConfigRow {
                   required property var modelData
                   required property int index
-                  width: profileColumn.width
-                  profile: modelData
+                  width: configColumn.width
+                  config: modelData
                   rowIndex: index
                 }
               }
             }
 
             Column {
-              visible: amnezia.ready && !amnezia.hasProfiles
+              visible: amnezia.ready && !amnezia.hasConfigs
               width: parent.width
               spacing: Style.space(6)
 
@@ -410,7 +424,7 @@ Panel {
 
               Text {
                 width: parent.width
-                text: "Import one with\nomarchy-amnezia import <file|vpn://…>"
+                text: "Add one with\nomarchy-shell amnezia add <file.conf>"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -421,7 +435,7 @@ Panel {
           }
 
           Text {
-            visible: amnezia.hasProfiles
+            visible: amnezia.hasConfigs
             width: parent.width
             text: "enter pick · c connect · t toggle · r refresh"
             color: root.dim
@@ -434,17 +448,17 @@ Panel {
     }
   }
 
-  component ProfileRow: CursorSurface {
-    id: profileRow
-    property var profile: null
+  component ConfigRow: CursorSurface {
+    id: configRow
+    property var config: null
     property int rowIndex: 0
 
-    readonly property string profileName: profile ? String(profile.name || "") : ""
-    readonly property bool isActive: profile ? profile.active === true : false
-    readonly property bool isSelected: profileName !== "" && profileName === amnezia.selected
-    readonly property string missingTool: Model.missingToolFor(profile, amnezia.tools)
+    readonly property string configName: config ? String(config.name || "") : ""
+    readonly property bool isActive: config ? config.up === true : false
+    readonly property bool isSelected: configName !== "" && configName === amnezia.selected
+    readonly property string missingTool: Model.missingToolFor(config, amnezia.backend, amnezia.tools)
 
-    hasCursor: root.cursorActive && root.focusSection === "profiles" && root.profileIndex === rowIndex
+    hasCursor: root.cursorActive && root.focusSection === "configs" && root.configIndex === rowIndex
     current: isSelected
     foreground: root.foreground
     fill: root.hoverFill
@@ -456,8 +470,8 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onEntered: root.setProfileCursor(profileRow.rowIndex)
-      onClicked: amnezia.select(profileRow.profileName)
+      onEntered: root.setConfigCursor(configRow.rowIndex)
+      onClicked: amnezia.select(configRow.configName)
     }
 
     RowLayout {
@@ -470,7 +484,7 @@ Panel {
 
       Text {
         text: root.shieldGlyph
-        color: profileRow.isActive ? root.foreground : root.dim
+        color: configRow.isActive ? root.foreground : root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         Layout.alignment: Qt.AlignVCenter
@@ -483,8 +497,8 @@ Panel {
 
         Text {
           Layout.fillWidth: true
-          text: profileRow.profileName
-          color: profileRow.missingTool === "" ? root.foreground : root.dim
+          text: configRow.configName
+          color: configRow.missingTool === "" ? root.foreground : root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
           elide: Text.ElideRight
@@ -492,8 +506,8 @@ Panel {
 
         Text {
           Layout.fillWidth: true
-          text: Model.profileMeta(profileRow.profile, amnezia.tools)
-          color: profileRow.missingTool === "" ? root.dim : root.urgent
+          text: Model.configMeta(configRow.config, amnezia.backend, amnezia.tools)
+          color: configRow.missingTool === "" ? root.dim : root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
@@ -501,7 +515,7 @@ Panel {
       }
 
       Text {
-        visible: profileRow.isActive
+        visible: configRow.isActive
         text: root.checkGlyph
         color: root.foreground
         font.family: root.fontFamily
@@ -510,13 +524,13 @@ Panel {
       }
 
       PanelActionButton {
-        iconText: profileRow.isActive ? root.disconnectGlyph : root.connectGlyph
-        tooltipText: profileRow.isActive ? "Disconnect" : "Connect"
+        iconText: configRow.isActive ? root.disconnectGlyph : root.connectGlyph
+        tooltipText: configRow.isActive ? "Disconnect" : "Connect"
         foreground: root.foreground
         fontFamily: root.fontFamily
-        enabled: !amnezia.busy && profileRow.missingTool === ""
+        enabled: !amnezia.busy && configRow.missingTool === ""
         Layout.alignment: Qt.AlignVCenter
-        onClicked: root.connectProfile(profileRow.profile)
+        onClicked: root.connectConfig(configRow.config)
       }
     }
   }

@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "rem-aster",
   "license": "MIT",
-  "description": "Turn an Amnezia (AmneziaWG/WireGuard) config on or off and switch between configs from the Omarchy bar.",
+  "description": "Turn an Amnezia (AmneziaWG/WireGuard) config on or off, switch between configs, and import new ones — all from the Omarchy bar.",
   "homepage": "https://github.com/rem-aster/omarchy-amnezia",
   "kinds": [
     "bar-widget"
@@ -21,7 +21,8 @@
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 15,
-      "switchWhenConnected": "On"
+      "switchWhenConnected": "On",
+      "backend": "auto"
     },
     "schema": [
       {
@@ -44,6 +45,18 @@
         ],
         "defaultValue": "On",
         "description": "When On, picking another config while connected moves the tunnel to it right away. When Off, picking only changes what the switch will connect next."
+      },
+      {
+        "key": "backend",
+        "type": "enum",
+        "label": "Connect with",
+        "options": [
+          "auto",
+          "daemon",
+          "quick"
+        ],
+        "defaultValue": "auto",
+        "description": "auto uses the AmneziaVPN service when its socket is there and awg-quick otherwise. daemon and quick pin the choice."
       }
     ]
   }
