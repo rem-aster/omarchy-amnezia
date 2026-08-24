@@ -50,8 +50,8 @@ Anything that needs a daemon of its own is out of scope, and the importer says
 so plainly instead of half-importing it:
 
 - OpenVPN, XRay/VLESS, Shadowsocks, IKEv2, SFTP/proxy containers
-- Amnezia Free and Amnezia Premium subscription keys (they need the app's API
-  client to fetch a server)
+- a raw Amnezia Free/Premium `vpn://` key — see [Subscription
+  keys](#subscription-keys) for what to import instead
 - split tunneling, kill switch, per-app routing, server setup over SSH
 
 For those, keep [the app](https://github.com/amnezia-vpn/amnezia-client).
@@ -113,6 +113,27 @@ cd ~/.config/omarchy/plugins/io.github.rem-aster.amnezia
 # or from the clipboard
 wl-paste | ./bin/omarchy-amnezia import - --name berlin
 ```
+
+### Subscription keys
+
+A `vpn://` key from Amnezia Free or Premium will not import, and the message
+says so. Those keys carry the config with the private key left as a
+`$WIREGUARD_CLIENT_PRIVATE_KEY` placeholder: the app generates the key pair
+itself and registers the public half with Amnezia's API, so nobody else can
+complete the key — the server would not recognise a key pair it never saw
+(`subscriptionController.cpp`).
+
+The app can hand you a finished config for exactly this purpose. Open the
+server in the app, then **Configuration Files** ("for router setup or the
+AmneziaWG app"), issue one for a country, and import the `.conf` it saves:
+
+```bash
+./bin/omarchy-amnezia import ~/Documents/de.conf --name germany
+```
+
+That export asks the API for a fresh key pair, so it counts as its own
+registered config — the app warns that issuing a new one stops the previous
+one working, and has a *Revoke* for it on the same screen.
 
 Configs land in `~/.config/omarchy/amnezia/configs/<name>.conf`, mode `600`. The
 name becomes the network interface name, so it is limited to 15 characters of
@@ -321,6 +342,10 @@ the `DNS` line with `omarchy-amnezia edit <name>`.
 **`Unable to access interface: Protocol not supported`** — `awg-quick` is there
 but the AmneziaWG kernel module is not. Install `amneziawg-dkms` and reboot, or
 `amneziawg-go` for a userspace fallback.
+
+**"This is an Amnezia subscription key"** — see [Subscription
+keys](#subscription-keys): export a config file from the app instead of pasting
+the `vpn://` key.
 
 **A config imports but will not connect** — run `./bin/omarchy-amnezia up <name>`
 in a terminal; `awg-quick` prints exactly what it refused. Very old
