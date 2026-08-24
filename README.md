@@ -2,8 +2,12 @@
 
 An [Omarchy Quattro](https://omarchy.org) shell plugin that puts Amnezia in the
 bar instead of on the desktop: a shield icon, one switch for on/off, and a list
-to pick which config the switch acts on. No Qt app, no tray icon, no background
-service of its own.
+to pick which config the switch acts on. No Qt app, no tray icon.
+
+It works two ways and picks for itself: if the official client's service is
+already installed, the plugin drives that — no password prompts at all. If it
+is not, the plugin raises the tunnel itself with `awg-quick` through polkit.
+See [Backends](#backends).
 
 ```
 ┌─────────────────────────────────┐
@@ -14,6 +18,7 @@ service of its own.
 │ Endpoint    203.0.113.10:35001  │
 │ Address            10.8.1.2/32  │
 │ Transfer      ↓ 4.2 MB ↑ 812 KB │
+│ Via         AmneziaVPN service  │
 │ ─────────────────────────────── │
 │ CONFIGS                         │
 │ 󰒃 berlin                   󰄬 󰏤 │
@@ -32,13 +37,14 @@ service of its own.
   while connected moves the tunnel over right away (configurable).
 - Imports configs from the Amnezia app: a `.conf` file, an exported
   `.vpn`/`.json` config, or a `vpn://` key.
+- Uses the official client's service when it is installed, so switching costs
+  no password and the transfer counters come off the real handshake.
 
 ## What it does not do
 
 The plugin runs **AmneziaWG and plain WireGuard** — the two protocols that need
-nothing but a userspace tool and a kernel interface. It does this by calling
-`awg-quick`/`wg-quick`; it does not talk to `AmneziaVPN-service`, and it does not
-replace the app.
+nothing more than a tunnel interface. Everything else about the app stays in the
+app: this is a switch and a config list, not a client.
 
 Anything that needs a daemon of its own is out of scope, and the importer says
 so plainly instead of half-importing it:
@@ -52,6 +58,11 @@ For those, keep [the app](https://github.com/amnezia-vpn/amnezia-client).
 
 ## Requirements
 
+`jq` and `python3` come with Omarchy, and that is all the **service backend**
+needs — the AmneziaVPN service ships its own tunnel binary.
+
+The **awg-quick backend** needs the tunnel tools on the box:
+
 | For | Install |
 | --- | --- |
 | AmneziaWG configs | `amneziawg-tools` **and** `amneziawg-dkms` (AUR) |
@@ -59,12 +70,12 @@ For those, keep [the app](https://github.com/amnezia-vpn/amnezia-client).
 | DNS from a config's `DNS =` line | `openresolv` or `systemd-resolvconf` |
 | Authorizing connect/disconnect | `polkit` (Omarchy's shell is the agent) |
 
-`jq` and `python3` come with Omarchy. Run `omarchy-amnezia doctor` to see what
-is missing on your box.
-
 ```bash
 yay -S amneziawg-tools amneziawg-dkms
 ```
+
+Run `omarchy-amnezia doctor` to see which backend is in force and what, if
+anything, is missing for it.
 
 ## Install
 
@@ -108,6 +119,59 @@ name becomes the network interface name, so it is limited to 15 characters of
 `a-z A-Z 0-9 _ = + . -` — the same rule `awg-quick` enforces. You can also drop
 a `.conf` in that directory by hand; the panel picks it up on its next refresh.
 
+## Backends
+
+There are two ways to raise a tunnel, and `auto` (the default) picks whichever
+the machine can do:
+
+| | **service** | **awg-quick** |
+| --- | --- | --- |
+| Needs | the official client installed | `amneziawg-tools` / `wireguard-tools` |
+| Password | never | one polkit prompt per switch |
+| Runs as root | the client's service, always | nothing between switches |
+| Interface | `amn0` (the service's own) | named after the config |
+| Transfer counters | from the real handshake | from `/sys/class/net` |
+
+```bash
+omarchy-amnezia backend                # what is in force, and why
+omarchy-amnezia backend daemon         # always use the service
+omarchy-amnezia backend quick          # always use awg-quick
+omarchy-amnezia backend auto           # decide per run (default)
+```
+
+`OMARCHY_AMNEZIA_BACKEND=quick` overrides the stored setting for one command.
+
+### The service backend
+
+The official client's installer leaves `AmneziaVPN.service` running as root from
+boot, and its GUI is just a client of it: newline-delimited JSON over
+`/var/run/amneziavpn/daemon.socket`, commands `activate` / `deactivate` /
+`status`. The socket is opened world-accessible and the service does not check
+who is calling — which is exactly why that client never asks for a password
+after install. This plugin speaks the same protocol, so on a machine that has
+the client it gets the same no-prompt switching, plus a `status` answer carrying
+the handshake's own byte counters.
+
+What that means in practice:
+
+- **The client has to be installed.** The service raises the tunnel by running
+  the `amneziawg-go` binary sitting next to it in `/opt/AmneziaVPN/bin`, so the
+  service alone is not enough — and no kernel module is needed either.
+- **The app and the plugin share one tunnel.** The service runs a single
+  interface, `amn0`. Connect from the app and the panel shows it; the panel
+  labels it *not imported here* when it is a config you never imported, and the
+  switch can still turn it off.
+- **The protocol is private.** It is inherited from mozilla-vpn and validated
+  strictly: an upstream change to the field list would show up here as a switch
+  that stops working. `omarchy-amnezia backend quick` is the way out.
+
+### The awg-quick backend
+
+No client, nothing running as root between switches: each connect is one
+`pkexec awg-quick up <config>`, so Omarchy's own polkit dialog authorizes it.
+Reading state needs no privileges at all — a live tunnel is a virtual interface
+named after its config under `/sys/class/net`, byte counters included.
+
 ## Use it
 
 | Where | Action |
@@ -126,11 +190,12 @@ a `.conf` in that directory by hand; the panel picks it up on its next refresh.
 | `r` | refresh |
 | `esc` | close |
 
-Connecting asks for authorization through polkit, which is Omarchy's own themed
-dialog. One prompt per connect or disconnect.
+On the awg-quick backend, connecting asks for authorization through polkit —
+Omarchy's own themed dialog, one prompt per connect or disconnect. On the
+service backend there is no prompt at all.
 
 Only one tunnel runs at a time: connecting a second config takes the first one
-down.
+down (the service does that switch itself).
 
 ### From a script or a keybind
 
@@ -176,23 +241,26 @@ omarchy-amnezia import <src>         import a .conf, a .vpn/.json, or a vpn:// k
 omarchy-amnezia remove <name>        delete a config
 omarchy-amnezia rename <old> <new>   rename a config
 omarchy-amnezia edit [name]          open a config in $EDITOR
-omarchy-amnezia doctor               check the tools this plugin needs
+omarchy-amnezia backend [name]       show or set how tunnels are raised
+omarchy-amnezia doctor               check the backend and what it needs
 ```
 
 ## How it works
 
 ```
-Panel.qml ── Service.qml ── bin/omarchy-amnezia ──┬── pkexec awg-quick up/down
-  bar icon     poll + state       shell            │
-  and panel    machine            plumbing         └── /sys/class/net (read-only state)
-                                       │
-                                       └── bin/amnezia-extract (vpn:// and JSON → .conf)
+Panel.qml ── Service.qml ── bin/omarchy-amnezia ──┬── bin/amnezia-daemon
+  bar icon     poll + state       shell           │     └── AmneziaVPN.service socket
+  and panel    machine            plumbing        │
+                                                  ├── pkexec awg-quick up/down
+                                                  ├── /sys/class/net (state, no privileges)
+                                                  └── bin/amnezia-extract
+                                                        (vpn:// and JSON → .conf)
 ```
 
-Reading state needs no privileges: a live tunnel is a directory under
-`/sys/class/net`, and its byte counters are readable files there. Only bringing
-a tunnel up or down goes through `pkexec`, one command at a time, so there is
-nothing long-running to trust.
+Both backends keep the privileged part to a single call with nothing of ours
+long-running: one `activate` message to a service that was already there, or one
+`pkexec awg-quick`. Neither needs a helper installed, a sudoers entry, or a
+polkit rule of its own.
 
 `bin/amnezia-extract` is the only part that had to follow the app's own format:
 a `vpn://` key is base64url over a `qCompress`'d payload (a 4-byte big-endian
@@ -205,27 +273,46 @@ Files:
 | Path | What |
 | --- | --- |
 | `~/.config/omarchy/amnezia/configs/<name>.conf` | your configs |
-| `~/.config/omarchy/amnezia/state.json` | which config is selected |
+| `~/.config/omarchy/amnezia/state.json` | the selected config, and the backend preference |
 | `$XDG_RUNTIME_DIR/omarchy-amnezia/<name>.since` | connect time, for the uptime line |
+| `$XDG_RUNTIME_DIR/omarchy-amnezia/active` | which config the service backend raised |
 
 ## Security notes
 
 - A `.conf` holds your private key. The plugin keeps configs at mode `600` in a
   `700` directory and never copies them anywhere else.
-- `awg-quick` runs `PreUp`/`PostUp` hooks **as root**. A config you did not
-  write yourself can therefore run commands as root when you connect it. Read a
-  config before importing it — `omarchy-amnezia edit <name>` opens it.
-- Because of that, this plugin ships no passwordless polkit rule and no sudoers
-  drop-in. If you decide you want one anyway, understand that it turns "anyone
-  who can write a file in your home directory" into "root", and scope the rule
-  as tightly as you can.
-- There is no kill switch. If the tunnel drops, traffic goes out the default
-  route as usual.
+- **On the service backend, the trust decision was made at install time, not
+  here.** `AmneziaVPN.service` runs as root from boot with a socket any local
+  process can command, and it never checks who is calling. That is what makes it
+  prompt-free — and it means any process on the machine can already point your
+  traffic at a server of its choosing, whether or not this plugin is installed.
+  The plugin uses that property; it does not create it. If you would rather not
+  have it, uninstall the client and run `omarchy-amnezia backend quick`.
+- **On the awg-quick backend, `PreUp`/`PostUp` hooks run as root.** A config you
+  did not write yourself can therefore run commands as root when you connect it.
+  Read a config before importing it — `omarchy-amnezia edit <name>` opens it.
+- Because of that hook behaviour, this plugin ships no passwordless polkit rule
+  and no sudoers drop-in for `awg-quick`. If you decide you want one anyway,
+  understand that it turns "anyone who can write a file in your home directory"
+  into "root", and scope the rule as tightly as you can.
+- There is no kill switch on either backend. If the tunnel drops, traffic goes
+  out the default route as usual.
 
 ## Troubleshooting
 
 **"Authorization cancelled"** — the polkit dialog was dismissed, or no polkit
 agent is running. Omarchy's shell provides one; check `omarchy-amnezia doctor`.
+Only the awg-quick backend prompts at all.
+
+**"the AmneziaVPN service is not running"** — the socket went away, usually
+because the client was uninstalled or `systemctl stop AmneziaVPN` was run.
+`omarchy-amnezia backend auto` will fall back to awg-quick on the next command;
+`systemctl start AmneziaVPN` brings the other path back.
+
+**"the AmneziaVPN service rejected the config"** — the service validates every
+field of the config it is handed and says nothing about which one it disliked.
+Its own log does: `/var/log/AmneziaVPN`. A config whose `Endpoint` is a hostname
+that no longer resolves is the common case.
 
 **`resolvconf: command not found`** — the config has a `DNS =` line and nothing
 on the box can apply it. Install `openresolv` or `systemd-resolvconf`, or delete
@@ -240,9 +327,12 @@ in a terminal; `awg-quick` prints exactly what it refused. Very old
 `amneziawg-tools` releases do not understand the newer obfuscation keys
 (`I1`–`I5`, `HeaderProtectionKey`, …) that recent Amnezia servers emit.
 
-**The panel says nothing is there but a tunnel is up** — the plugin only knows
-about interfaces named after a config in its own directory. A tunnel started
-from `/etc/amnezia/amneziawg/` under a different name is invisible to it.
+**The panel says nothing is there but a tunnel is up** — on the awg-quick
+backend the plugin only knows about interfaces named after a config in its own
+directory, so a tunnel raised from `/etc/amnezia/amneziawg/` under another name
+is invisible to it. On the service backend it will see the tunnel but show the
+config as *not imported here*, because the service reports an address that
+matches none of your configs.
 
 ## Credits
 

@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""Drive an already-installed AmneziaVPN service instead of awg-quick.
+
+The official client's installer leaves a root systemd service
+(`AmneziaVPN.service`) listening on a unix socket, and the GUI is just a
+client of it: newline-delimited JSON, commands `activate` / `deactivate` /
+`status`. The socket is opened world-accessible and the service does not
+check who is calling (`daemonlocalserver.cpp` sets
+`QLocalServer::WorldAccessOption` and chmods its directory 0777), so any
+local process can drive it — which is exactly why the official client never
+asks for a password after install.
+
+This speaks that protocol, so on a machine that already has the client the
+plugin gets password-free on/off and real handshake counters. It needs the
+client installed: the service brings the tunnel up by spawning the
+`amneziawg-go` binary sitting next to it in /opt/AmneziaVPN/bin, always on
+interface `amn0`.
+
+The activate payload mirrors `LocalSocketController::activate()` field for
+field, including the hardcoded IPv6 ULA — the comment there explains that
+without it some Linux setups retry IPv6 forever instead of falling back.
+
+Commands:
+
+    amnezia-daemon status            {"available":…, "connected":…, "rxBytes":…}
+    amnezia-daemon up <conf-path>    {"ok":true} or {"ok":false,"error":…}
+    amnezia-daemon down              {"ok":true}
+
+Only stdlib, so it runs wherever the plugin does.
+"""
+
+import json
+import os
+import socket
+import sys
+
+# The service's own path list, in the order it tries them.
+SOCKET_PATHS = (
+    "/run/amneziavpn/daemon.socket",
+    "/var/run/amneziavpn/daemon.socket",
+    "/tmp/amneziavpn.socket",
+)
+
+CONNECT_TIMEOUT = 2.0
+STATUS_TIMEOUT = 4.0
+# The service creates the interface, sets routes and DNS, then answers; it is
+# not waiting for a handshake, so this is generous rather than tight.
+ACTIVATE_TIMEOUT = 25.0
+
+# Obfuscation knobs, named identically in the .conf and in the payload
+# (configKeys.h: awgProtocolKeys()). Forwarded verbatim as strings.
+AWG_KEYS = (
+    "Jc", "Jmin", "Jmax",
+    "S1", "S2", "S3", "S4",
+    "H1", "H2", "H3", "H4",
+    "I1", "I2", "I3", "I4", "I5",
+    "HeaderProtectionKey", "ContentPaddingAddition",
+    "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
+    "KeepaliveTimeout", "MaxHandshakeAttempts",
+    "RandomTrailers", "DisableCookies",
+)
+
+# Same value the client hardcodes: a non-routable ULA so the OS sees the IPv6
+# link as local and falls back to IPv4 instead of hanging.
+DEVICE_IPV6 = "fd58:baa6:dead::1"
+
+
+def emit(payload):
+    json.dump(payload, sys.stdout)
+    sys.stdout.write("\n")
+    sys.exit(0)
+
+
+def fail(message):
+    emit({"ok": False, "error": str(message)})
+
+
+def socket_path():
+    # An override for a non-standard install (and for the test harness).
+    override = os.environ.get("AMNEZIA_DAEMON_SOCKET", "")
+    if override:
+        return override if os.path.exists(override) else ""
+    for path in SOCKET_PATHS:
+        try:
+            if os.path.exists(path):
+                return path
+        except OSError:
+            continue
+    return ""
+
+
+class Daemon:
+    """One connection, one command. The service keeps the tunnel up after we
+    disconnect — it only drops the connection object — so there is no reason
+    to hold the socket open between calls."""
+
+    def __init__(self, path):
+        self.buffer = b""
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(CONNECT_TIMEOUT)
+        self.sock.connect(path)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def send(self, payload):
+        self.sock.sendall(json.dumps(payload).encode() + b"\n")
+
+    def messages(self, timeout):
+        """Yield decoded messages until the timeout or the socket closes."""
+        self.sock.settimeout(timeout)
+        while True:
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(message, dict):
+                    yield message
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                return
+            except OSError:
+                return
+            if not chunk:
+                return
+            self.buffer += chunk
+
+    def await_type(self, wanted, timeout):
+        for message in self.messages(timeout):
+            if str(message.get("type", "")) in wanted:
+                return message
+        return None
+
+
+def parse_conf(text):
+    """[Interface]/[Peer] into two dicts of lowercased key → value."""
+    sections = {"interface": {}, "peer": {}}
+    current = None
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].strip().lower()
+            continue
+        if current not in sections:
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        sections[current].setdefault(key.strip().lower(), value.strip())
+    return sections["interface"], sections["peer"]
+
+
+def split_endpoint(endpoint):
+    value = str(endpoint or "").strip()
+    if not value:
+        return "", 0
+    if value.startswith("["):  # [2001:db8::1]:51820
+        host, _, rest = value[1:].partition("]")
+        port = rest.lstrip(":")
+    else:
+        host, _, port = value.rpartition(":")
+        if not host:
+            host, port = value, ""
+    try:
+        return host, int(port)
+    except ValueError:
+        return host, 0
+
+
+def resolve(host):
+    """The service turns these strings straight into addresses and routes —
+    `IPAddress(...)` for the exclusion route, an endpoint for the UAPI — so a
+    hostname has to become an address before it leaves here."""
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_DGRAM)
+    except socket.gaierror as error:
+        raise ValueError("could not resolve %s (%s)" % (host, error.strerror or error))
+    for info in infos:
+        return info[4][0]
+    raise ValueError("could not resolve %s" % host)
+
+
+def allowed_ranges(value):
+    ranges = []
+    for entry in str(value or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        address, _, prefix = entry.partition("/")
+        address = address.strip()
+        is_ipv6 = ":" in address
+        if prefix.strip():
+            try:
+                length = int(prefix.strip())
+            except ValueError:
+                continue
+        else:
+            length = 128 if is_ipv6 else 32
+        ranges.append({"address": address, "range": length, "isIpv6": is_ipv6})
+    if not ranges:
+        ranges = [
+            {"address": "0.0.0.0", "range": 0, "isIpv6": False},
+            {"address": "::", "range": 0, "isIpv6": True},
+        ]
+    return ranges
+
+
+def first_ipv4(value):
+    for entry in str(value or "").split(","):
+        entry = entry.strip()
+        if entry and ":" not in entry:
+            return entry
+    return ""
+
+
+def dns_servers(value):
+    servers = [entry.strip() for entry in str(value or "").split(",")]
+    return [entry for entry in servers if entry]
+
+
+def build_activate(conf_text):
+    interface, peer = parse_conf(conf_text)
+
+    private_key = interface.get("privatekey", "")
+    public_key = peer.get("publickey", "")
+    address = first_ipv4(interface.get("address", ""))
+    host, port = split_endpoint(peer.get("endpoint", ""))
+
+    for label, value in (("PrivateKey", private_key), ("PublicKey", public_key),
+                         ("Address", address), ("Endpoint", peer.get("endpoint", ""))):
+        if not value:
+            raise ValueError("the config has no %s" % label)
+    if port <= 0:
+        raise ValueError("the config's Endpoint has no port")
+
+    server = resolve(host)
+
+    payload = {
+        "type": "activate",
+        "privateKey": private_key,
+        "serverPublicKey": public_key,
+        "serverPskKey": peer.get("presharedkey", peer.get("preshared-key", "")),
+        "serverPort": port,
+        "deviceIpv4Address": address,
+        "deviceIpv6Address": DEVICE_IPV6,
+        "serverIpv4AddrIn": server,
+        "serverIpv4Gateway": server,
+        "allowedIPAddressRanges": allowed_ranges(peer.get("allowedips", "")),
+        # Traffic to the endpoint itself must stay off the tunnel, or the
+        # tunnel routes its own packets. The client excludes the same address.
+        "excludedAddresses": [server],
+        "vpnDisabledApps": [],
+        "allowedDnsServers": [],
+        "killSwitchOption": "false",
+    }
+
+    # deviceMTU is read as `value.toString().toInt()`, so a JSON number reads
+    # as 0 and silently falls back to 1420. Send the string.
+    mtu = interface.get("mtu", "")
+    if mtu:
+        payload["deviceMTU"] = str(mtu)
+
+    keepalive = peer.get("persistentkeepalive", "")
+    if keepalive:
+        payload["persistentKeepalive"] = str(keepalive)
+
+    servers = dns_servers(interface.get("dns", ""))
+    if servers:
+        payload["primaryDnsServer"] = servers[0]
+    if len(servers) > 1:
+        payload["secondaryDnsServer"] = servers[1]
+
+    for key in AWG_KEYS:
+        value = interface.get(key.lower(), "")
+        if value:
+            payload[key] = str(value)
+
+    return payload
+
+
+def command_status():
+    path = socket_path()
+    if not path:
+        emit({"available": False, "connected": False,
+              "error": "the AmneziaVPN service is not running"})
+    try:
+        daemon = Daemon(path)
+    except OSError as error:
+        emit({"available": False, "connected": False,
+              "error": "cannot reach the AmneziaVPN service (%s)" % error.strerror})
+
+    try:
+        daemon.send({"type": "status"})
+        message = daemon.await_type({"status"}, STATUS_TIMEOUT)
+    finally:
+        daemon.close()
+
+    if message is None:
+        emit({"available": True, "socket": path, "connected": False,
+              "error": "the AmneziaVPN service did not answer"})
+
+    emit({
+        "available": True,
+        "socket": path,
+        "connected": message.get("connected") is True,
+        "rxBytes": int(message.get("rxBytes") or 0),
+        "txBytes": int(message.get("txBytes") or 0),
+        "deviceIpv4Address": str(message.get("deviceIpv4Address") or ""),
+        "serverIpv4Gateway": str(message.get("serverIpv4Gateway") or ""),
+        "date": str(message.get("date") or ""),
+    })
+
+
+def command_up(conf_path):
+    path = socket_path()
+    if not path:
+        fail("the AmneziaVPN service is not running")
+    try:
+        with open(conf_path, encoding="utf-8") as handle:
+            conf_text = handle.read()
+    except OSError as error:
+        fail("cannot read %s (%s)" % (conf_path, error.strerror))
+
+    try:
+        payload = build_activate(conf_text)
+    except ValueError as error:
+        fail(error)
+
+    try:
+        daemon = Daemon(path)
+    except OSError as error:
+        fail("cannot reach the AmneziaVPN service (%s)" % error.strerror)
+
+    try:
+        daemon.send(payload)
+        # The service answers `connected` on success and `disconnected` (or
+        # `backendFailure`) when it refused the config.
+        message = daemon.await_type({"connected", "disconnected", "backendFailure"},
+                                    ACTIVATE_TIMEOUT)
+    finally:
+        daemon.close()
+
+    if message is None:
+        fail("the AmneziaVPN service did not answer")
+    kind = str(message.get("type", ""))
+    if kind == "connected":
+        emit({"ok": True})
+    if kind == "backendFailure":
+        fail("the AmneziaVPN service failed to connect (error %s); "
+             "see /var/log/AmneziaVPN" % message.get("errorCode"))
+    fail("the AmneziaVPN service rejected the config; see /var/log/AmneziaVPN")
+
+
+def command_down():
+    path = socket_path()
+    if not path:
+        fail("the AmneziaVPN service is not running")
+    try:
+        daemon = Daemon(path)
+    except OSError as error:
+        fail("cannot reach the AmneziaVPN service (%s)" % error.strerror)
+
+    try:
+        daemon.send({"type": "deactivate"})
+        # `deactivate` is fire-and-forget in the client too; wait briefly so a
+        # follow-up status call sees the result, but do not treat silence as
+        # failure.
+        daemon.await_type({"disconnected"}, STATUS_TIMEOUT)
+    finally:
+        daemon.close()
+    emit({"ok": True})
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        fail("usage: amnezia-daemon status|up <conf>|down")
+    command = argv[0]
+    if command == "status":
+        command_status()
+    elif command == "up":
+        if len(argv) < 2:
+            fail("usage: amnezia-daemon up <conf-path>")
+        command_up(argv[1])
+    elif command == "down":
+        command_down()
+    else:
+        fail("unknown command: %s" % command)
+
+
+if __name__ == "__main__":
+    main()

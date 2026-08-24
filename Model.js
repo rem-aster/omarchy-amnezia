@@ -12,8 +12,10 @@ function defaultStatus() {
     rxBytes: 0,
     txBytes: 0,
     since: 0,
+    activeForeign: false,
     profiles: [],
-    tools: { awgQuick: false, wgQuick: false, resolvconf: false, priv: "none" }
+    tools: { backend: "", daemon: false, awgQuick: false, wgQuick: false,
+             resolvconf: false, priv: "none" }
   }
 }
 
@@ -33,6 +35,9 @@ function parseStatus(raw) {
   status.ok = true
   status.selected = String(parsed.selected || "")
   status.active = parsed.active === true
+  // The service can be running a config this plugin never imported — the
+  // official app connecting to another server looks exactly like that.
+  status.activeForeign = parsed.activeForeign === true
   status.activeProfile = String(parsed.activeProfile || "")
   status.protocol = String(parsed.protocol || "")
   status.rxBytes = Number(parsed.rxBytes || 0)
@@ -41,6 +46,8 @@ function parseStatus(raw) {
   status.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : []
   if (parsed.tools && typeof parsed.tools === "object") {
     status.tools = {
+      backend: String(parsed.tools.backend || ""),
+      daemon: parsed.tools.daemon === true,
       awgQuick: parsed.tools.awgQuick === true,
       wgQuick: parsed.tools.wgQuick === true,
       resolvconf: parsed.tools.resolvconf === true,
@@ -57,11 +64,22 @@ function protocolLabel(protocol) {
 }
 
 // The tool a config needs is decided by the config, so a config the box
-// cannot run should say so on its own row rather than only on failure.
+// cannot run should say so on its own row rather than only on failure. The
+// AmneziaVPN service brings its own bundled backend, so in that mode there is
+// nothing on the box to be missing.
 function missingToolFor(profile, tools) {
   if (!profile || !tools) return ""
+  if (String(tools.backend) === "daemon") return ""
   if (String(profile.protocol) === "awg") return tools.awgQuick ? "" : "needs amneziawg-tools"
   return tools.wgQuick || tools.awgQuick ? "" : "needs wireguard-tools"
+}
+
+// How the tunnel is being raised, for the panel's own line about it.
+function backendLabel(tools) {
+  if (!tools) return ""
+  if (String(tools.backend) === "daemon") return "AmneziaVPN service"
+  if (String(tools.backend) === "quick") return "awg-quick"
+  return ""
 }
 
 function profileMeta(profile, tools) {
@@ -115,6 +133,7 @@ function heroMeta(status, busy, profileCount, nowMs) {
     if (Number(profileCount) === 0) return "No configs"
     return "Disconnected"
   }
+  if (status.activeForeign) return "Connected · another config"
   var uptime = uptimeText(status.since, nowMs)
   return uptime === "" ? "Connected" : "Connected · " + uptime
 }

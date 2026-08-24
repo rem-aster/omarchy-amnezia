@@ -47,12 +47,13 @@ Panel {
   readonly property var activeEntry: amnezia.profileByName(amnezia.activeProfile)
   readonly property var selectedEntry: amnezia.profileByName(amnezia.selected)
   readonly property var shownEntry: activeEntry || selectedEntry
-  readonly property bool headerHasCursor: cursorActive && focusSection === "header" && amnezia.hasProfiles
+  readonly property bool headerHasCursor: cursorActive && focusSection === "header"
+    && (amnezia.hasProfiles || amnezia.connected)
   readonly property string toggleHint: amnezia.connected
-    ? "Disconnect " + amnezia.activeProfile
+    ? "Disconnect " + (amnezia.activeProfile !== "" ? amnezia.activeProfile : "the tunnel")
     : (amnezia.selected === "" ? "No config to connect" : "Connect " + amnezia.selected)
   readonly property string barTooltip: amnezia.connected
-    ? "Amnezia: " + amnezia.activeProfile
+    ? "Amnezia: " + (amnezia.activeProfile !== "" ? amnezia.activeProfile : "connected")
     : "Amnezia: off"
 
   function ensureCursor() {
@@ -113,7 +114,8 @@ Panel {
   }
 
   function toggleConnection() {
-    if (!amnezia.busy && amnezia.hasProfiles) amnezia.toggle()
+    if (amnezia.busy) return
+    if (amnezia.hasProfiles || amnezia.connected) amnezia.toggle()
   }
 
   function connectProfile(profile) {
@@ -281,8 +283,8 @@ Panel {
               trailingControl: Component {
                 ToggleSwitch {
                   id: powerSwitch
-                  enabled: amnezia.hasProfiles
-                  opacity: amnezia.hasProfiles ? 1.0 : 0.4
+                  enabled: amnezia.hasProfiles || amnezia.connected
+                  opacity: amnezia.hasProfiles || amnezia.connected ? 1.0 : 0.4
                   checked: amnezia.connected
                   busy: amnezia.busy
                   hasCursor: header.ringVisible
@@ -322,17 +324,24 @@ Panel {
           }
 
           Column {
-            visible: amnezia.connected && root.activeEntry !== null
+            visible: amnezia.connected
             width: parent.width
             spacing: Style.spacing.labelGap
 
-            InfoPair { label: "Config"; value: amnezia.activeProfile }
+            InfoPair {
+              label: "Config"
+              // The service will happily be running something the app
+              // connected to, which is not one of the configs listed below.
+              value: amnezia.activeProfile !== "" ? amnezia.activeProfile : "not imported here"
+            }
             InfoPair {
               label: "Endpoint"
+              visible: root.activeEntry !== null
               value: root.activeEntry ? String(root.activeEntry.endpoint || "—") : "—"
             }
             InfoPair {
               label: "Address"
+              visible: root.activeEntry !== null
               value: root.activeEntry ? String(root.activeEntry.address || "—") : "—"
             }
             InfoPair {
@@ -343,6 +352,11 @@ Panel {
             InfoPair {
               label: "Transfer"
               value: Model.transferText(amnezia.status.rxBytes, amnezia.status.txBytes)
+            }
+            InfoPair {
+              label: "Via"
+              visible: value !== ""
+              value: Model.backendLabel(amnezia.tools)
             }
           }
 

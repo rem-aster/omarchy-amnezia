@@ -47,7 +47,11 @@ Item {
   // False until the first poll answers, so the panel does not flash an empty
   // state or a missing-tools warning built out of the placeholder status.
   readonly property bool ready: status.ok === true
-  readonly property bool toolsMissing: !status.tools.awgQuick && !status.tools.wgQuick
+  readonly property string backend: status.tools.backend
+  // Nothing to install when the AmneziaVPN service is doing the work: it
+  // ships its own tunnel binary.
+  readonly property bool toolsMissing: backend !== "daemon"
+    && !status.tools.awgQuick && !status.tools.wgQuick
 
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 15, 2, 600)
   readonly property bool switchWhenConnected: String(setting("switchWhenConnected", "On")) !== "Off"
