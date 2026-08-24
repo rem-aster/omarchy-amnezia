@@ -12,7 +12,7 @@ import "Model.js" as Model
 // bar icon toggles the tunnel without opening anything.
 Panel {
   id: root
-  moduleName: "io.github.rem-aster.amnezia"
+  moduleName: "rem-aster.amnezia"
   ipcTarget: "amnezia"
   manageIpc: false
 
@@ -24,11 +24,17 @@ Panel {
   readonly property string connectGlyph: "󰐊"
   readonly property string disconnectGlyph: "󰏤"
 
-  // The plugin's own scripts, named the way remco.wireguard names its own:
-  // `omarchy plugin add` always clones to this directory, and nothing here
-  // ever goes on PATH.
-  readonly property string pluginDir: Quickshell.env("HOME")
-    + "/.config/omarchy/plugins/io.github.rem-aster.amnezia"
+  // The plugin's own scripts, run from the plugin's directory the way other
+  // Omarchy plugins run theirs — nothing here ever goes on PATH. The directory
+  // comes from where this file was actually loaded, so a checkout that was
+  // renamed or placed by hand keeps working; the install path is the fallback.
+  readonly property string pluginDir: {
+    var url = String(Qt.resolvedUrl("."))
+    if (url.indexOf("file://") === 0) url = url.substring(7)
+    url = decodeURIComponent(url).replace(/\/+$/, "")
+    if (url === "") url = Quickshell.env("HOME") + "/.config/omarchy/plugins/rem-aster.amnezia"
+    return url
+  }
   readonly property string cliPath: pluginDir + "/scripts/amnezia"
 
   property string focusSection: "header"

@@ -32,7 +32,7 @@ omarchy plugin add https://github.com/rem-aster/omarchy-amnezia.git --enable --y
 ```
 
 The widget lands on the right of the bar; `omarchy bar move
-io.github.rem-aster.amnezia` puts it elsewhere. Everything the plugin needs
+rem-aster.amnezia` puts it elsewhere. Everything the plugin needs
 lives in its own directory — its scripts are run from there, nothing is placed
 on your `PATH`, and no service is installed.
 
@@ -54,6 +54,18 @@ nothing is put on `PATH` any more:
 ```bash
 rm -f ~/.local/bin/omarchy-amnezia
 ```
+
+**Installed as `io.github.rem-aster.amnezia`?** That was the old id, and the id
+is the plugin's directory name, so it has to be reinstalled rather than pulled:
+
+```bash
+omarchy plugin remove io.github.rem-aster.amnezia
+omarchy plugin add https://github.com/rem-aster/omarchy-amnezia.git --enable --yes
+omarchy-restart-shell
+```
+
+Your configs are not in the plugin directory — they live in
+`~/.config/omarchy/amnezia/` and are untouched by this.
 
 ## 2. Get a config out of the Amnezia app
 
@@ -79,7 +91,7 @@ Same thing straight from the plugin, when the bar is not running or you want
 the output in front of you:
 
 ```bash
-~/.config/omarchy/plugins/io.github.rem-aster.amnezia/scripts/amnezia import ~/Downloads/de.conf
+~/.config/omarchy/plugins/rem-aster.amnezia/scripts/amnezia import ~/Downloads/de.conf
 ```
 
 A second argument names it: `add ~/Downloads/de.conf germany`. Otherwise the
@@ -134,7 +146,7 @@ is what the widget runs. Calling it directly gives you the full output, plus a
 few things the panel has no use for:
 
 ```bash
-cd ~/.config/omarchy/plugins/io.github.rem-aster.amnezia
+cd ~/.config/omarchy/plugins/rem-aster.amnezia
 ./scripts/amnezia status              # human-readable, --json for the panel's view
 ./scripts/amnezia doctor              # what this machine has, and what is missing
 ./scripts/amnezia backend daemon      # pin how tunnels are raised
@@ -146,8 +158,8 @@ cd ~/.config/omarchy/plugins/io.github.rem-aster.amnezia
 
 ```bash
 omarchy-shell amnezia down            # if a tunnel is up
-omarchy plugin disable io.github.rem-aster.amnezia
-omarchy plugin remove io.github.rem-aster.amnezia
+omarchy plugin disable rem-aster.amnezia
+omarchy plugin remove rem-aster.amnezia
 rm -rf ~/.config/omarchy/amnezia      # your configs — only if you want them gone
 ```
 
@@ -185,7 +197,7 @@ and each connect or disconnect shows one polkit password dialog.
 On the widget's entry in `~/.config/omarchy/shell.json`:
 
 ```json
-{ "id": "io.github.rem-aster.amnezia", "refreshIntervalSec": 15, "switchWhenConnected": "On", "backend": "auto" }
+{ "id": "rem-aster.amnezia", "refreshIntervalSec": 15, "switchWhenConnected": "On" }
 ```
 
 - **`refreshIntervalSec`** (15) — how often the panel re-reads the state.
@@ -223,7 +235,7 @@ both mean the widget is not running. Check that it is enabled and placed:
 
 ```bash
 omarchy plugin list | grep amnezia
-omarchy bar move io.github.rem-aster.amnezia right
+omarchy bar move rem-aster.amnezia right
 omarchy-restart-shell
 ```
 
