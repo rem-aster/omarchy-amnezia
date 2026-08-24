@@ -21,8 +21,7 @@
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 15,
-      "switchWhenConnected": "On",
-      "backend": "auto"
+      "switchWhenConnected": "On"
     },
     "schema": [
       {
@@ -45,18 +44,6 @@
         ],
         "defaultValue": "On",
         "description": "When On, picking another config while connected moves the tunnel to it right away. When Off, picking only changes what the switch will connect next."
-      },
-      {
-        "key": "backend",
-        "type": "enum",
-        "label": "Connect with",
-        "options": [
-          "auto",
-          "daemon",
-          "quick"
-        ],
-        "defaultValue": "auto",
-        "description": "auto uses the AmneziaVPN service when its socket is there and awg-quick otherwise. daemon and quick pin the choice."
       }
     ]
   }

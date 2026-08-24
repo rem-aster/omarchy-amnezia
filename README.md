@@ -32,26 +32,28 @@ omarchy plugin add https://github.com/rem-aster/omarchy-amnezia.git --enable --y
 ```
 
 The widget lands on the right of the bar; `omarchy bar move
-io.github.rem-aster.amnezia` puts it elsewhere. Nothing is installed outside the
-plugin directory — no commands on your `PATH`, no helper binaries, no services.
+io.github.rem-aster.amnezia` puts it elsewhere. Everything the plugin needs
+lives in its own directory — its scripts are run from there, nothing is placed
+on your `PATH`, and no service is installed.
 
 Plugins run unsandboxed inside `omarchy-shell`, so read the code before enabling
 one.
 
-### Upgrading from a version with the `omarchy-amnezia` command
+### Upgrading
 
-Earlier versions shipped a CLI and symlinked it into `~/.local/bin`. Both are
-gone; everything moved to `omarchy-shell amnezia …` below. After updating,
-reload the shell so it stops running the old widget:
+Reload the shell after any update, or the still-loaded old widget keeps calling
+files the new checkout has moved:
 
 ```bash
 omarchy-restart-shell
 ```
 
-Without that, the still-loaded old widget keeps calling a script the new
-checkout no longer has and says `bin/omarchy-amnezia: No such file or
-directory`. The stale symlink is removed by the plugin itself on its next
-start — nothing to clean up by hand.
+If a previous version left `~/.local/bin/omarchy-amnezia` behind, delete it —
+nothing is put on `PATH` any more:
+
+```bash
+rm -f ~/.local/bin/omarchy-amnezia
+```
 
 ## 2. Get a config out of the Amnezia app
 
@@ -71,6 +73,13 @@ fill in, so nothing else can use it. The plugin says so if you try.
 ```bash
 omarchy-shell amnezia add ~/Downloads/de.conf
 omarchy-shell amnezia list
+```
+
+Same thing straight from the plugin, when the bar is not running or you want
+the output in front of you:
+
+```bash
+~/.config/omarchy/plugins/io.github.rem-aster.amnezia/scripts/amnezia import ~/Downloads/de.conf
 ```
 
 A second argument names it: `add ~/Downloads/de.conf germany`. Otherwise the
@@ -118,7 +127,20 @@ omarchy-shell amnezia open / close / toggle    # the panel
 ```
 
 `add`, `up` and `down` answer straight away and do the work in the background;
-the panel shows the result, and a failure also arrives as a notification.
+the panel shows the result.
+
+The same commands are in `scripts/amnezia` inside the plugin directory, which
+is what the widget runs. Calling it directly gives you the full output, plus a
+few things the panel has no use for:
+
+```bash
+cd ~/.config/omarchy/plugins/io.github.rem-aster.amnezia
+./scripts/amnezia status              # human-readable, --json for the panel's view
+./scripts/amnezia doctor              # what this machine has, and what is missing
+./scripts/amnezia backend daemon      # pin how tunnels are raised
+./scripts/amnezia edit berlin         # open a config in $EDITOR
+./scripts/amnezia rename berlin de    # rename one
+```
 
 ## Remove it
 
@@ -169,8 +191,9 @@ On the widget's entry in `~/.config/omarchy/shell.json`:
 - **`refreshIntervalSec`** (15) — how often the panel re-reads the state.
 - **`switchWhenConnected`** (`On`) — whether picking another config while
   connected moves the tunnel right away, or only decides what connects next.
-- **`backend`** (`auto`) — `auto` uses the AmneziaVPN service when its socket is
-  there and `awg-quick` otherwise. `daemon` and `quick` pin the choice.
+
+How tunnels are raised is not a widget setting — it is remembered by the plugin
+itself: `./scripts/amnezia backend auto|daemon|quick`.
 
 ## Good to know
 
@@ -194,6 +217,23 @@ plugin, and `backend: quick` opts out of using it. There is no kill switch
 either way.
 
 ## Troubleshooting
+
+**No icon in the bar, and `omarchy-shell amnezia …` says "Target not found"** —
+both mean the widget is not running. Check that it is enabled and placed:
+
+```bash
+omarchy plugin list | grep amnezia
+omarchy bar move io.github.rem-aster.amnezia right
+omarchy-restart-shell
+```
+
+If it is enabled and still absent, the QML failed to load; the shell's log says
+why:
+
+```bash
+qs log -p "$OMARCHY_PATH/shell" | grep -i amnezia
+qs ipc -p "$OMARCHY_PATH/shell" show | grep -i amnezia   # registered IPC targets
+```
 
 **"That is an Amnezia subscription key"** — you passed a `vpn://` key. Export a
 `.conf` from the app instead, per step 2.
