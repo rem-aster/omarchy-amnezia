@@ -138,6 +138,35 @@ printf 'client\ndev tun\nremote 198.51.100.1\n' >"$WORK/legacy.ovpn"
 OUT="$(cmd_import "$WORK/legacy.ovpn" 2>&1)"
 expect "refuses OpenVPN with a reason" "1" "$(grep -c 'OpenVPN' <<<"$OUT")"
 
+# A subscription key carries its config with the private key left as a
+# placeholder for the app to fill, so it cannot be completed here. The two
+# placeholder cases have to be told apart, or the message sends people to the
+# wrong screen.
+write_subscription_key() {
+  python3 -c 'import base64, json, struct, zlib
+conf = ("[Interface]\nAddress = 10.8.1.2/32\n"
+        "PrivateKey = $WIREGUARD_CLIENT_PRIVATE_KEY\nJc = 4\n\n"
+        "[Peer]\nPublicKey = c2VydmVycHVibGlja2V5c2VydmVycHVibGljMTI=\n"
+        "AllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.10:35001\n")
+config = {"containers": [{"container": "amnezia-awg",
+                          "awg": {"last_config": json.dumps({"config": conf})}}],
+          "defaultContainer": "amnezia-awg"}
+raw = json.dumps(config).encode()
+blob = struct.pack(">I", len(raw)) + zlib.compress(raw, 8)
+print("vpn://" + base64.urlsafe_b64encode(blob).decode().rstrip("="))'
+}
+
+OUT="$(cmd_import "$(write_subscription_key)" 2>&1)"
+expect "names a subscription key as one" "1" "$(grep -c 'subscription key' <<<"$OUT")"
+expect "and points at the config-file export" "1" \
+  "$(grep -c 'Configuration Files' <<<"$OUT")"
+
+printf '[Interface]\nAddress = $WIREGUARD_SUBNET_IP/32\nPrivateKey = k\n\n[Peer]\nPublicKey = p\nEndpoint = 1.2.3.4:51820\n' \
+  >"$WORK/template.conf"
+OUT="$(cmd_import "$WORK/template.conf" 2>&1)"
+expect "refuses a bare template without calling it a subscription" "1" \
+  "$(grep -c 'template rather than a client config' <<<"$OUT")"
+
 # --- select ----------------------------------------------------------------
 
 cmd_select oslo
@@ -184,6 +213,38 @@ expect "removing a profile drops it from the list" "0" \
   "$(cmd_list --json | jq '[.[] | select(.name == "berlin")] | length')"
 expect "the selection moves off the removed profile" "1" \
   "$(status_field '.selected' | grep -cv '^berlin$')"
+
+# --- PATH ----------------------------------------------------------------
+
+# The widget calls `link --quiet` at startup, so this has to be a no-op when
+# there is nothing to do and must never clobber a real file.
+LINK_HOME="$WORK/linkhome"
+LINK="$LINK_HOME/.local/bin/omarchy-amnezia"
+CLI_REAL="$(readlink -f "$CLI")"
+
+expect "link puts the CLI on PATH" "$CLI_REAL" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link >/dev/null && readlink -f "$LINK")"
+expect "linking twice changes nothing" "already on PATH: $LINK" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link)"
+
+ln -sfn /nowhere/omarchy-amnezia "$LINK"
+expect "a dangling link is repointed" "$CLI_REAL" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link >/dev/null && readlink -f "$LINK")"
+
+rm -f "$LINK"
+printf '#!/bin/sh\n' >"$LINK"
+OUT="$(HOME="$LINK_HOME" bash "$CLI" link 2>&1)"
+expect "a real file in the way is refused, not overwritten" "1" \
+  "$(grep -c 'is not a symlink' <<<"$OUT")"
+expect "and stays untouched" "#!/bin/sh" "$(cat "$LINK")"
+expect "quiet mode says nothing about it" "" \
+  "$(HOME="$LINK_HOME" bash "$CLI" link --quiet 2>&1)"
+
+rm -f "$LINK"
+HOME="$LINK_HOME" bash "$CLI" link >/dev/null
+expect "unlink removes it" "removed $LINK" "$(HOME="$LINK_HOME" bash "$CLI" unlink)"
+expect "unlink is quiet when there is nothing there" "nothing to remove" \
+  "$(HOME="$LINK_HOME" bash "$CLI" unlink)"
 
 # --- names ---------------------------------------------------------------
 

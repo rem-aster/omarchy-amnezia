@@ -204,6 +204,25 @@ def suggest_name(config, fallback):
     return sanitize(fallback)
 
 
+# An Amnezia Free/Premium key carries the config with the private key left as a
+# placeholder: the app generates the keypair itself and registers the public
+# half with Amnezia's API (subscriptionController.cpp), so the key alone cannot
+# be completed by anyone else — the server would not know the public key.
+SUBSCRIPTION_PLACEHOLDERS = ("$WIREGUARD_CLIENT_PRIVATE_KEY", "$XRAY_CLIENT_ID")
+
+
+def check_subscription_template(text):
+    for placeholder in SUBSCRIPTION_PLACEHOLDERS:
+        if placeholder in text:
+            fail("This is an Amnezia subscription key: its private key is a "
+                 "%s placeholder that only the app can fill, because the app "
+                 "generates the key pair and registers the public half with "
+                 "Amnezia's API. Export a ready config instead — in the app open "
+                 "the server, then Configuration Files (\"for router setup or the "
+                 "AmneziaWG app\"), issue one for a country and import the .conf "
+                 "it saves." % placeholder, "api")
+
+
 def emit(conf, name):
     conf = conf.strip() + "\n"
     keys = conf_keys(conf)
@@ -211,8 +230,11 @@ def emit(conf, name):
         if not keys.get(required):
             fail("The config has no %s — it is not a complete client config." % required)
     if re.search(r"=\s*\$[A-Z_]", conf):
-        fail("This is a server-side template with unresolved placeholders, "
-             "not a client config. Export the client config from the Amnezia app.")
+        fail("This config still has unresolved $PLACEHOLDERS where its keys and "
+             "addresses should be, so it is a template rather than a client "
+             "config. Export the client config from the Amnezia app: open the "
+             "server, then Sharing for a self-hosted server, or Configuration "
+             "Files for a subscription.")
     json.dump({"name": name, "protocol": protocol_of(conf), "conf": conf}, sys.stdout)
     sys.stdout.write("\n")
     sys.exit(0)
@@ -231,6 +253,8 @@ def main():
     decoded = decode_vpn_key(text)
     if decoded:
         text = decoded.strip()
+
+    check_subscription_template(text)
 
     if text.startswith("{"):
         try:
