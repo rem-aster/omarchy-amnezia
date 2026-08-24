@@ -1,0 +1,855 @@
+#!/bin/bash
+
+# amnezia — the plugin's hands.
+#
+# Lives inside the plugin and is run by the widget from the plugin's own
+# directory, the way other Omarchy plugins ship their scripts; nothing is
+# placed on PATH. The widget owns the UI, this owns everything that touches the
+# disk or the network stack, so the panel is one `status --json` call away from
+# the truth, and every privileged step is a single, auditable command.
+#
+# A profile is a plain AmneziaWG/WireGuard .conf in
+# ~/.config/omarchy/amnezia/configs/. There are two ways to raise one, and
+# `backend` below picks between them:
+#
+#   daemon — an already-installed AmneziaVPN service. The official client's
+#            installer leaves it running as root from boot with a socket that
+#            takes commands from any local process, which is why that client
+#            never asks for a password after install. Same deal here: no
+#            prompts, and its status answer carries real handshake counters.
+#   quick  — `awg-quick up <path>` through pkexec, so Omarchy's own polkit
+#            dialog is the authorization surface. Nothing runs as root
+#            between switches; the cost is one prompt per switch.
+#
+# `auto` takes the daemon when its socket is there — a machine that has it
+# has already accepted that trade — and falls back to quick otherwise.
+
+set -uo pipefail
+
+PROGRAM="amnezia"
+SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+EXTRACTOR="$SELF_DIR/amnezia-extract"
+DAEMON_CLI="$SELF_DIR/amnezia-daemon"
+
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+AMNEZIA_DIR="${OMARCHY_AMNEZIA_DIR:-$CONFIG_HOME/omarchy/amnezia}"
+PROFILE_DIR="$AMNEZIA_DIR/configs"
+STATE_FILE="$AMNEZIA_DIR/state.json"
+# Runtime state records which profile is up. With no XDG_RUNTIME_DIR the
+# fallback has to be per-uid and owner-only: a shared /tmp path would let any
+# local user plant that record.
+if [[ -n ${XDG_RUNTIME_DIR:-} ]]; then
+  RUNTIME_DIR="$XDG_RUNTIME_DIR/omarchy-amnezia"
+else
+  RUNTIME_DIR="/tmp/omarchy-amnezia-$(id -u)"
+fi
+
+# awg-quick names the interface after the config file, and only accepts these.
+NAME_PATTERN='^[a-zA-Z0-9_=+.-]{1,15}$'
+
+die() {
+  echo "$PROGRAM: $*" >&2
+  exit 1
+}
+
+ensure_dirs() {
+  mkdir -p -- "$PROFILE_DIR" || die "could not create $PROFILE_DIR"
+  chmod 700 -- "$AMNEZIA_DIR" "$PROFILE_DIR" 2>/dev/null
+  mkdir -p -- "$RUNTIME_DIR" 2>/dev/null && chmod 700 -- "$RUNTIME_DIR" 2>/dev/null
+}
+
+valid_name() {
+  [[ $1 =~ $NAME_PATTERN && $1 != .* && $1 != *..* ]]
+}
+
+require_name() {
+  valid_name "${1:-}" || die "invalid profile name '${1:-}' (1-15 chars of a-z A-Z 0-9 _ = + . -)"
+}
+
+profile_path() {
+  printf '%s/%s.conf\n' "$PROFILE_DIR" "$1"
+}
+
+profile_exists() {
+  [[ -f $(profile_path "$1") ]]
+}
+
+# Every .conf in the profile dir whose name awg-quick would accept. A file
+# that cannot become an interface is skipped rather than listed and then
+# refused on click.
+profile_names() {
+  local path name
+  shopt -s nullglob
+  for path in "$PROFILE_DIR"/*.conf; do
+    name="${path##*/}"
+    name="${name%.conf}"
+    valid_name "$name" && printf '%s\n' "$name"
+  done
+  shopt -u nullglob
+}
+
+# Everything the panel needs out of one .conf, in one pass:
+#
+#   protocol \t endpoint \t address \t dns \t mtu
+#
+# AmneziaWG is WireGuard plus obfuscation knobs, so the presence of any of
+# those keys is also what decides which userspace tool can bring the config
+# up. Keeping the whole read in a single awk keeps a poll cheap: the panel
+# refreshes on a timer, and a bar widget has no business spawning a process
+# per field.
+conf_fields() {
+  awk '
+    {
+      line = $0
+      sub(/#.*/, "", line)
+      if (line ~ /^[[:space:]]*\[/) next
+      eq = index(line, "=")
+      if (eq == 0) next
+      key = tolower(substr(line, 1, eq - 1))
+      gsub(/[[:space:]]/, "", key)
+      value = substr(line, eq + 1)
+      gsub(/\t/, " ", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (value == "") next
+      if (key == "endpoint" && endpoint == "") endpoint = value
+      else if (key == "address" && address == "") address = value
+      else if (key == "dns" && dns == "") dns = value
+      else if (key == "mtu" && mtu == "") mtu = value
+      if (key ~ /^(jc|jmin|jmax|s[1-4]|h[1-4]|i[1-5]|headerprotectionkey|contentpaddingaddition|rekeyaftertime|rekeytimeout|rejectaftertime|keepalivetimeout|maxhandshakeattempts|randomtrailers|disablecookies)$/) awg = 1
+    }
+    END { printf "%s\t%s\t%s\t%s\t%s\n", (awg ? "awg" : "wireguard"), endpoint, address, dns, mtu }
+  ' "$1" 2>/dev/null
+}
+
+protocol_of() {
+  conf_fields "$1" | cut -f1
+}
+
+have() {
+  command -v -- "$1" >/dev/null 2>&1
+}
+
+# The tool that speaks this config's dialect. wg-quick rejects the Amnezia
+# knobs outright, so an AmneziaWG config has exactly one answer.
+quick_tool() {
+  case "$1" in
+    awg) have awg-quick && printf 'awg-quick\n' ;;
+    *) have wg-quick && printf 'wg-quick\n' || { have awg-quick && printf 'awg-quick\n'; } ;;
+  esac
+}
+
+missing_tool_hint() {
+  if [[ $1 == awg ]]; then
+    printf 'awg-quick is missing. Install amneziawg-tools and amneziawg-dkms (AUR).\n'
+  else
+    printf 'wg-quick is missing. Install wireguard-tools.\n'
+  fi
+}
+
+# AmneziaWG runs either as a kernel module or through the Go userspace
+# implementation; awg-quick picks whichever is there, so report the same.
+amneziawg_backend() {
+  if [[ -d /sys/module/amneziawg ]]; then
+    printf 'kernel module, loaded\n'
+  elif have modinfo && modinfo amneziawg >/dev/null 2>&1; then
+    printf 'kernel module\n'
+  elif have amneziawg-go; then
+    printf 'amneziawg-go\n'
+  else
+    return 1
+  fi
+}
+
+# A live tunnel is a virtual interface named after its config. `device` only
+# exists for interfaces backed by hardware, which keeps a config unluckily
+# named after the user's ethernet card from reading as permanently connected;
+# loopback has no `device` either, so it is named out.
+iface_up() {
+  local dir="/sys/class/net/$1"
+  [[ -d $dir && ! -e $dir/device && $1 != lo ]]
+}
+
+iface_bytes() {
+  cat "/sys/class/net/$1/statistics/$2_bytes" 2>/dev/null || printf '0\n'
+}
+
+# The profile that is actually up right now, if any. Interface names are
+# profile names, so the kernel is the source of truth and a tunnel started
+# outside the plugin still shows up.
+active_profile() {
+  local name
+  if [[ $BACKEND == daemon ]]; then
+    [[ $DAEMON_CONNECTED == true ]] || return 1
+    daemon_active_name
+    return
+  fi
+  while IFS= read -r name; do
+    iface_up "$name" && { printf '%s\n' "$name"; return 0; }
+  done < <(profile_names)
+  return 1
+}
+
+read_state() {
+  [[ -f $STATE_FILE ]] || return 1
+  jq -er --arg key "$1" '.[$key] // "" | select(. != "")' "$STATE_FILE" 2>/dev/null
+}
+
+write_state() {
+  ensure_dirs
+  local tmp
+  tmp="$(mktemp "$AMNEZIA_DIR/.state.XXXXXX")" || die "could not write $STATE_FILE"
+  if [[ -f $STATE_FILE ]]; then
+    jq --arg key "$1" --arg value "$2" '.[$key] = $value' "$STATE_FILE" >"$tmp" 2>/dev/null \
+      || jq -n --arg key "$1" --arg value "$2" '{($key): $value}' >"$tmp"
+  else
+    jq -n --arg key "$1" --arg value "$2" '{($key): $value}' >"$tmp"
+  fi
+  chmod 600 -- "$tmp" && mv -- "$tmp" "$STATE_FILE"
+}
+
+# The profile the switch acts on: what the user picked, then whatever is live
+# (a tunnel started outside the panel, or a selection that no longer exists),
+# then the only profile there is.
+selected_profile() {
+  local recorded active first
+  recorded="$(read_state selected)"
+  if [[ -n $recorded ]] && profile_exists "$recorded"; then
+    printf '%s\n' "$recorded"
+    return 0
+  fi
+  active="$(active_profile)" && { printf '%s\n' "$active"; return 0; }
+  first="$(profile_names | head -n 1)"
+  [[ -n $first ]] && { printf '%s\n' "$first"; return 0; }
+  return 1
+}
+
+# One privileged command, one authorization. pkexec so the shell's polkit
+# agent asks; sudo only when there is a terminal to type into.
+run_priv() {
+  if [[ $EUID -eq 0 ]]; then
+    "$@"
+  elif [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] && have pkexec; then
+    pkexec "$@"
+  elif [[ -t 0 ]] && have sudo; then
+    sudo -- "$@"
+  elif have pkexec; then
+    pkexec "$@"
+  else
+    die "no way to get root: install polkit (pkexec) or run this as root"
+  fi
+}
+
+priv_method() {
+  if [[ $EUID -eq 0 ]]; then printf 'root\n'
+  elif [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] && have pkexec; then printf 'pkexec\n'
+  elif [[ -t 0 ]] && have sudo; then printf 'sudo\n'
+  elif have pkexec; then printf 'pkexec\n'
+  else printf 'none\n'
+  fi
+}
+
+since_file() {
+  printf '%s/%s.since\n' "$RUNTIME_DIR" "$1"
+}
+
+# The profile the daemon backend last raised. The service names its interface
+# `amn0` whatever config it is running, so unlike the quick backend the
+# interface cannot tell us which profile is up.
+active_file() {
+  printf '%s/active\n' "$RUNTIME_DIR"
+}
+
+# ------------------------------------------------------------------ backends
+
+daemon_socket() {
+  local candidate
+  for candidate in "${AMNEZIA_DAEMON_SOCKET:-}" /run/amneziavpn/daemon.socket \
+      /var/run/amneziavpn/daemon.socket /tmp/amneziavpn.socket; do
+    [[ -n $candidate && -S $candidate ]] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+daemon_available() {
+  daemon_socket >/dev/null
+}
+
+resolve_backend() {
+  local requested="${OMARCHY_AMNEZIA_BACKEND:-}"
+  [[ -n $requested ]] || requested="$(read_state backend)"
+  case "${requested:-auto}" in
+    daemon) printf 'daemon\n' ;;
+    quick) printf 'quick\n' ;;
+    *) if daemon_available && have python3; then printf 'daemon\n'; else printf 'quick\n'; fi ;;
+  esac
+}
+
+DAEMON_CONNECTED=false
+DAEMON_RX=0
+DAEMON_TX=0
+DAEMON_DEVICE_IP=""
+
+# One round trip per CLI invocation, read into globals. The panel polls on a
+# timer, and several helpers below need the answer, so asking the service
+# once per command keeps a poll to a single socket round trip.
+daemon_load() {
+  have python3 || die "python3 is required to talk to the AmneziaVPN service"
+  local raw
+  raw="$(python3 "$DAEMON_CLI" status 2>/dev/null)"
+  jq -e . >/dev/null 2>&1 <<<"$raw" || raw='{}'
+  IFS=$'\t' read -r DAEMON_CONNECTED DAEMON_RX DAEMON_TX DAEMON_DEVICE_IP < <(
+    jq -r '[(.connected // false), (.rxBytes // 0), (.txBytes // 0),
+            (.deviceIpv4Address // "")] | @tsv' <<<"$raw")
+}
+
+daemon_reply_ok() {
+  # Prints nothing and returns 0 on success; prints the reason otherwise.
+  local reply="$1"
+  if jq -e . >/dev/null 2>&1 <<<"$reply"; then
+    [[ $(jq -r '.ok // false' <<<"$reply") == true ]] && return 0
+    local error
+    error="$(jq -r '.error // ""' <<<"$reply")"
+    printf '%s\n' "${error:-the AmneziaVPN service refused the request}"
+  else
+    printf '%s\n' "$(tr '\n' ' ' <<<"$reply")"
+  fi
+  return 1
+}
+
+daemon_up() {
+  local name="$1" path="$2" reply reason
+  have python3 || die "python3 is required to talk to the AmneziaVPN service"
+  reply="$(python3 "$DAEMON_CLI" up "$path" 2>&1)"
+  reason="$(daemon_reply_ok "$reply")" || die "$reason"
+  ensure_dirs
+  # The service replaced whatever it was running, so no other stamp survives.
+  rm -f -- "$RUNTIME_DIR"/*.since
+  printf '%s\n' "$name" >"$(active_file)" 2>/dev/null
+  date +%s >"$(since_file "$name")" 2>/dev/null
+  DAEMON_CONNECTED=true
+}
+
+daemon_down() {
+  local reply reason
+  have python3 || die "python3 is required to talk to the AmneziaVPN service"
+  reply="$(python3 "$DAEMON_CLI" down 2>&1)"
+  reason="$(daemon_reply_ok "$reply")" || die "$reason"
+  rm -f -- "$(active_file)" "$RUNTIME_DIR"/*.since
+  DAEMON_CONNECTED=false
+}
+
+strip_mask() {
+  printf '%s\n' "${1%%/*}"
+}
+
+profile_address() {
+  conf_fields "$(profile_path "$1")" | cut -f3
+}
+
+# Which profile the service is running. Our own record answers it, but only
+# while the address the service reports still matches — otherwise the GUI (or
+# another session) moved the tunnel and the record is stale.
+daemon_active_name() {
+  local recorded name device
+  device="$(strip_mask "$DAEMON_DEVICE_IP")"
+  recorded="$(cat "$(active_file)" 2>/dev/null)"
+  # The record is ours, but it is a file on disk: hold it to the same rule as
+  # an argument before it reaches profile_path.
+  valid_name "$recorded" || recorded=""
+  if [[ -n $recorded ]] && profile_exists "$recorded"; then
+    if [[ -z $device || $(strip_mask "$(profile_address "$recorded")") == "$device" ]]; then
+      printf '%s\n' "$recorded"
+      return 0
+    fi
+  fi
+  [[ -n $device ]] || return 1
+  while IFS= read -r name; do
+    [[ $(strip_mask "$(profile_address "$name")") == "$device" ]] && {
+      printf '%s\n' "$name"
+      return 0
+    }
+  done < <(profile_names)
+  return 1
+}
+
+# Is this particular profile the one that is up?
+profile_active() {
+  if [[ $BACKEND == daemon ]]; then
+    [[ $DAEMON_CONNECTED == true ]] || return 1
+    [[ "$(daemon_active_name)" == "$1" ]]
+  else
+    iface_up "$1"
+  fi
+}
+
+# Is anything up at all? Not the same question as `active_profile`, which can
+# come up empty on a tunnel the service raised from a config we do not have.
+is_connected() {
+  if [[ $BACKEND == daemon ]]; then
+    [[ $DAEMON_CONNECTED == true ]]
+  else
+    active_profile >/dev/null
+  fi
+}
+
+# ------------------------------------------------------------------ commands
+
+cmd_list() {
+  if [[ ${1:-} == --json ]]; then
+    profiles_json
+    return
+  fi
+  local name active protocol endpoint
+  active="$(active_profile)"
+  while IFS= read -r name; do
+    IFS=$'\t' read -r protocol endpoint _ < <(conf_fields "$(profile_path "$name")")
+    printf '%s %-16s %-10s %s\n' \
+      "$([[ $name == "$active" ]] && printf '*' || printf ' ')" \
+      "$name" "$protocol" "$endpoint"
+  done < <(profile_names)
+}
+
+# One row per profile through a single jq, so the panel's poll costs an awk
+# per config and nothing more.
+profiles_json() {
+  local name active selected
+  active="$(active_profile)"
+  selected="$(selected_profile)"
+  {
+    while IFS= read -r name; do
+      printf '%s\t%s\n' "$name" "$(conf_fields "$(profile_path "$name")")"
+    done < <(profile_names)
+  } | jq -R -s --arg active "${active:-}" --arg selected "${selected:-}" '
+    split("\n")
+    | map(select(length > 0) | split("\t"))
+    | map({
+        name: .[0],
+        protocol: (.[1] // ""),
+        endpoint: (.[2] // ""),
+        address: (.[3] // ""),
+        dns: (.[4] // ""),
+        mtu: (.[5] // ""),
+        active: (.[0] == $active),
+        selected: (.[0] == $selected)
+      })'
+}
+
+cmd_status() {
+  local active selected path protocol rx=0 tx=0 since=0 connected=false
+  active="$(active_profile)"
+  selected="$(selected_profile)"
+  is_connected && connected=true
+
+  if [[ $BACKEND == daemon ]]; then
+    # Counters straight off the service's own handshake, not from sysfs.
+    rx="$DAEMON_RX"
+    tx="$DAEMON_TX"
+  elif [[ -n $active ]]; then
+    rx="$(iface_bytes "$active" rx)"
+    tx="$(iface_bytes "$active" tx)"
+  fi
+  if [[ -n $active && -f $(since_file "$active") ]]; then
+    since="$(cat "$(since_file "$active")" 2>/dev/null)"
+    # `status --json` is what the panel parses; a stamp that is not a number
+    # would take the whole answer down with it.
+    [[ $since =~ ^[0-9]+$ ]] || since=0
+  fi
+  protocol=""
+  path="$(profile_path "${selected:-}")"
+  [[ -n $selected && -f $path ]] && protocol="$(protocol_of "$path")"
+
+  if [[ ${1:-} != --json ]]; then
+    local via
+    [[ $BACKEND == daemon ]] && via="via the AmneziaVPN service" || via="via $(quick_tool "${protocol:-awg}")"
+    if [[ -n $active ]]; then
+      echo "connected: $active ($(protocol_of "$(profile_path "$active")")) $via"
+    elif [[ $connected == true ]]; then
+      echo "connected: a config this plugin does not have $via"
+    elif [[ -n $selected ]]; then
+      echo "disconnected (selected: $selected) $via"
+    else
+      echo "disconnected (no profiles — run '$PROGRAM import <file|vpn://…>')"
+    fi
+    return 0
+  fi
+
+  jq -n \
+    --arg selected "${selected:-}" \
+    --arg activeProfile "${active:-}" \
+    --arg protocol "$protocol" \
+    --argjson active "$connected" \
+    --argjson activeForeign "$([[ $connected == true && -z $active ]] && printf 'true' || printf 'false')" \
+    --argjson rxBytes "${rx:-0}" \
+    --argjson txBytes "${tx:-0}" \
+    --argjson since "${since:-0}" \
+    --argjson profiles "$(profiles_json)" \
+    --argjson tools "$(tools_json)" \
+    '{selected: $selected, active: $active, activeProfile: $activeProfile,
+      activeForeign: $activeForeign, protocol: $protocol, rxBytes: $rxBytes,
+      txBytes: $txBytes, since: $since, profiles: $profiles, tools: $tools}'
+}
+
+tools_json() {
+  jq -n \
+    --arg backend "$BACKEND" \
+    --argjson daemon "$(daemon_available && printf 'true' || printf 'false')" \
+    --argjson awgQuick "$(have awg-quick && printf 'true' || printf 'false')" \
+    --argjson wgQuick "$(have wg-quick && printf 'true' || printf 'false')" \
+    --argjson resolvconf "$({ have resolvconf || have resolvectl; } && printf 'true' || printf 'false')" \
+    --arg priv "$(priv_method)" \
+    '{backend: $backend, daemon: $daemon, awgQuick: $awgQuick, wgQuick: $wgQuick,
+      resolvconf: $resolvconf, priv: $priv}'
+}
+
+# Picking is only picking. Moving a live tunnel to the picked profile is
+# `up`, which the panel calls when its "switch on pick" setting says so.
+cmd_select() {
+  require_name "${1:-}"
+  profile_exists "$1" || die "no such profile: $1"
+  write_state selected "$1"
+}
+
+cmd_up() {
+  local name="${1:-}"
+  [[ -n $name ]] || name="$(selected_profile)"
+  [[ -n $name ]] || die "no profile to bring up — run '$PROGRAM import <file|vpn://…>'"
+  require_name "$name"
+  profile_exists "$name" || die "no such profile: $name"
+
+  local path protocol tool active
+  path="$(profile_path "$name")"
+
+  if profile_active "$name"; then
+    write_state selected "$name"
+    echo "$name is already up"
+    return 0
+  fi
+
+  if [[ $BACKEND == daemon ]]; then
+    # The service switches by itself when it is already running something, so
+    # there is nothing to take down first.
+    daemon_up "$name" "$path"
+    write_state selected "$name"
+    return 0
+  fi
+
+  protocol="$(protocol_of "$path")"
+  tool="$(quick_tool "$protocol")"
+  [[ -n $tool ]] || die "$(missing_tool_hint "$protocol")"
+
+  # One tunnel at a time: two default routes would be a coin toss.
+  active="$(active_profile)"
+  [[ -n $active ]] && cmd_down "$active"
+
+  chmod 600 -- "$path" 2>/dev/null
+  run_priv "$tool" up "$path" || die "$tool could not bring up $name"
+  ensure_dirs
+  date +%s >"$(since_file "$name")" 2>/dev/null
+  write_state selected "$name"
+}
+
+cmd_down() {
+  local name="${1:-}"
+
+  if [[ $BACKEND == daemon ]]; then
+    # The service runs one tunnel, so there is only ever one thing to stop —
+    # including a tunnel raised from a config this plugin does not have.
+    if [[ $DAEMON_CONNECTED != true ]]; then
+      echo "nothing is connected"
+      return 0
+    fi
+    daemon_down
+    return 0
+  fi
+
+  [[ -n $name ]] || name="$(active_profile)"
+  [[ -n $name ]] || { echo "nothing is connected"; return 0; }
+  require_name "$name"
+
+  if ! iface_up "$name"; then
+    echo "$name is not up"
+    return 0
+  fi
+
+  local path protocol tool
+  path="$(profile_path "$name")"
+  if [[ -f $path ]]; then
+    protocol="$(protocol_of "$path")"
+    tool="$(quick_tool "$protocol")"
+    [[ -n $tool ]] || die "$(missing_tool_hint "$protocol")"
+    run_priv "$tool" down "$path" || die "$tool could not bring down $name"
+  else
+    # The config is gone but the interface is not; tear it down by name so the
+    # user is never stuck with a tunnel they cannot switch off from the panel.
+    tool="$(quick_tool awg)"
+    [[ -n $tool ]] || tool="$(quick_tool wireguard)"
+    [[ -n $tool ]] || die "no wg-quick/awg-quick to bring down $name"
+    run_priv "$tool" down "$name" || die "$tool could not bring down $name"
+  fi
+  rm -f -- "$(since_file "$name")"
+}
+
+cmd_toggle() {
+  local name="${1:-}" active
+  active="$(active_profile)"
+  if [[ -n $name ]]; then
+    # A named toggle is about that profile: down if it is the live one, up
+    # otherwise — including when something else is up and has to give way.
+    if [[ $name == "$active" ]]; then cmd_down "$active"
+    else cmd_up "$name"
+    fi
+    return
+  fi
+  if is_connected; then cmd_down "$active"
+  else cmd_up ""
+  fi
+}
+
+cmd_import() {
+  local source="" name="" force=0
+  while (($#)); do
+    case "$1" in
+      --name) name="${2:-}"; shift 2 ;;
+      --name=*) name="${1#*=}"; shift ;;
+      --force) force=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      -*) die "unknown option: $1" ;;
+      *) source="$1"; shift ;;
+    esac
+  done
+  [[ -n $source ]] || die "usage: $PROGRAM import <file|vpn://…|-> [--name NAME]"
+  [[ -x $EXTRACTOR || -f $EXTRACTOR ]] || die "missing helper: $EXTRACTOR"
+  have python3 || die "python3 is required to read Amnezia configs"
+
+  local fallback payload
+  if [[ $source == - ]]; then
+    fallback="${name:-amnezia}"
+    payload="$(python3 "$EXTRACTOR" "$fallback")" || die "could not read the config"
+  elif [[ $source == vpn://* || $source == amnezia://* ]]; then
+    fallback="${name:-amnezia}"
+    payload="$(printf '%s' "$source" | python3 "$EXTRACTOR" "$fallback")" || die "could not read the key"
+  else
+    [[ -f $source ]] || die "no such file: $source"
+    fallback="${name:-$(basename -- "${source%.*}")}"
+    payload="$(python3 "$EXTRACTOR" "$fallback" <"$source")" || die "could not read $source"
+  fi
+
+  local error
+  error="$(jq -r '.error // ""' <<<"$payload")"
+  [[ -z $error ]] || die "$error"
+
+  local conf protocol
+  conf="$(jq -r '.conf' <<<"$payload")"
+  protocol="$(jq -r '.protocol' <<<"$payload")"
+  [[ -n $name ]] || name="$(jq -r '.name' <<<"$payload")"
+  require_name "$name"
+
+  ensure_dirs
+  if profile_exists "$name" && ((!force)); then
+    local suffix=2 candidate="$name" stem
+    while profile_exists "$candidate"; do
+      stem="${name:0:$((14 - ${#suffix}))}"
+      candidate="${stem%%[-.]}-$suffix"
+      ((suffix++))
+      ((suffix > 99)) && die "too many profiles named like $name"
+    done
+    name="$candidate"
+    require_name "$name"
+  fi
+
+  local path
+  path="$(profile_path "$name")"
+  printf '%s' "$conf" >"$path" || die "could not write $path"
+  chmod 600 -- "$path"
+  [[ -n $(read_state selected) ]] || write_state selected "$name"
+  echo "imported $name ($protocol)"
+  # Only the quick backend needs anything installed to run this; the service
+  # brings its own.
+  if [[ $BACKEND != daemon && -z $(quick_tool "$protocol") ]]; then
+    echo "warning: $(missing_tool_hint "$protocol")" >&2
+  fi
+}
+
+cmd_remove() {
+  require_name "${1:-}"
+  profile_exists "$1" || die "no such profile: $1"
+  profile_active "$1" && cmd_down "$1"
+  rm -f -- "$(profile_path "$1")"
+  [[ $(read_state selected) == "$1" ]] && write_state selected "$(profile_names | head -n 1)"
+  echo "removed $1"
+}
+
+cmd_rename() {
+  require_name "${1:-}"
+  require_name "${2:-}"
+  profile_exists "$1" || die "no such profile: $1"
+  profile_exists "$2" && die "profile already exists: $2"
+  profile_active "$1" && die "disconnect $1 before renaming it"
+  mv -- "$(profile_path "$1")" "$(profile_path "$2")" || die "could not rename $1"
+  [[ $(read_state selected) == "$1" ]] && write_state selected "$2"
+  echo "renamed $1 to $2"
+}
+
+cmd_edit() {
+  local name="${1:-}"
+  [[ -n $name ]] || name="$(selected_profile)"
+  require_name "$name"
+  profile_exists "$name" || die "no such profile: $name"
+  "${EDITOR:-nvim}" "$(profile_path "$name")"
+}
+
+cmd_doctor() {
+  local ok=0
+  check() {
+    if [[ $1 == ok ]]; then
+      printf '  \033[32m✓\033[0m %s\n' "$2"
+    else
+      printf '  \033[31m✗\033[0m %s\n' "$2"
+      ok=1
+    fi
+  }
+  note() {
+    printf '  · %s\n' "$1"
+  }
+  echo "Amnezia plugin checks"
+  printf '  backend: %s\n' "$BACKEND"
+
+  if [[ $BACKEND == daemon ]]; then
+    check ok "AmneziaVPN service socket ($(daemon_socket))"
+    have python3 && check ok "python3 (talks to the service)" \
+      || check no "python3 missing — the service backend needs it"
+    note "awg-quick, the amneziawg module and resolvconf are not used in this mode"
+    note "the service does its own DNS and routing, and asks for no password"
+    have jq && check ok "jq" || check no "jq missing"
+    printf '  profiles: %s\n' "$(profile_names | wc -l)"
+    printf '  directory: %s\n' "$PROFILE_DIR"
+    return $ok
+  fi
+
+  if daemon_available; then
+    note "an AmneziaVPN service socket exists — '$PROGRAM backend daemon' would drop the password prompts"
+  fi
+  if have awg-quick; then
+    check ok "awg-quick (AmneziaWG configs)"
+  else
+    check no "awg-quick missing — install amneziawg-tools (AUR) for AmneziaWG configs"
+  fi
+  if amneziawg_backend; then
+    check ok "amneziawg backend ($(amneziawg_backend))"
+  else
+    check no "no amneziawg backend — install amneziawg-dkms or amneziawg-go (AUR)"
+  fi
+  if have wg-quick; then
+    check ok "wg-quick (plain WireGuard configs)"
+  else
+    check no "wg-quick missing — install wireguard-tools for plain WireGuard configs"
+  fi
+  if have resolvconf || have resolvectl; then
+    check ok "resolvconf/resolvectl (DNS from the config)"
+  else
+    check no "no resolvconf — a config with a DNS line will fail; install openresolv or systemd-resolvconf"
+  fi
+  have jq && check ok "jq" || check no "jq missing"
+  have python3 && check ok "python3 (config import)" || check no "python3 missing"
+  if [[ $(priv_method) != none ]]; then
+    check ok "privilege escalation: $(priv_method)"
+  else
+    check no "no pkexec and no sudo — connecting needs root"
+  fi
+  printf '  profiles: %s\n' "$(profile_names | wc -l)"
+  printf '  directory: %s\n' "$PROFILE_DIR"
+  return $ok
+}
+
+# Shows the backend in force, or records a preference. `auto` re-decides on
+# every run, which is what makes installing (or removing) the client just
+# work without a second step here.
+cmd_backend() {
+  local requested="${1:-}"
+  if [[ -z $requested ]]; then
+    printf 'backend: %s (setting: %s, service socket: %s)\n' \
+      "$BACKEND" "$(read_state backend || printf 'auto')" \
+      "$(daemon_socket || printf 'none')"
+    return 0
+  fi
+  case "$requested" in
+    auto | daemon | quick)
+      [[ $requested != daemon ]] || daemon_available \
+        || die "no AmneziaVPN service socket — is the official client installed and running?"
+      write_state backend "$requested"
+      printf 'backend set to %s\n' "$requested"
+      ;;
+    *) die "unknown backend '$requested' (auto, daemon, quick)" ;;
+  esac
+}
+
+usage() {
+  cat <<USAGE
+Usage: $PROGRAM <command> [args]
+
+  status [--json]           what is connected, plus every profile
+  list [--json]             list profiles
+  up [name]                 connect (defaults to the selected profile)
+  down [name]               disconnect (defaults to whatever is connected)
+  toggle [name]             connect if off, disconnect if on
+  select <name>             make this the profile the switch acts on
+  import <file> [--name N]  import a .conf saved by the Amnezia app
+                            (an exported .vpn/.json also works; - reads stdin)
+  remove <name>             delete a profile
+  rename <old> <new>        rename a profile
+  edit [name]               open a profile in \$EDITOR
+  backend [auto|daemon|quick]
+                            show or set how tunnels are raised
+  doctor                    check the tools this plugin needs
+
+Profiles live in $PROFILE_DIR
+
+Backends: 'daemon' drives an already-installed AmneziaVPN service (no
+password prompts, real handshake counters); 'quick' runs awg-quick through
+pkexec (one prompt per switch). 'auto', the default, takes the service when
+its socket is there. OMARCHY_AMNEZIA_BACKEND overrides the stored setting.
+USAGE
+}
+
+main() {
+  local command="${1:-status}"
+  shift 2>/dev/null
+
+  # Ask the service once, up front, for the commands whose answer depends on
+  # what it is running.
+  if [[ $BACKEND == daemon ]]; then
+    case "$command" in
+      status | list | ls | up | connect | down | disconnect | toggle | select | use \
+        | remove | rm | delete | rename | mv | import | add)
+        daemon_load
+        ;;
+    esac
+  fi
+
+  case "$command" in
+    status) cmd_status "$@" ;;
+    list|ls) cmd_list "$@" ;;
+    up|connect) cmd_up "$@" ;;
+    down|disconnect) cmd_down "$@" ;;
+    toggle) cmd_toggle "$@" ;;
+    select|use) cmd_select "$@" ;;
+    import|add) cmd_import "$@" ;;
+    remove|rm|delete) cmd_remove "$@" ;;
+    rename|mv) cmd_rename "$@" ;;
+    edit) cmd_edit "$@" ;;
+    backend) cmd_backend "$@" ;;
+    doctor|check) cmd_doctor ;;
+    -h|--help|help) usage ;;
+    *) usage >&2; die "unknown command: $command" ;;
+  esac
+}
+
+have jq || die "jq is required"
+
+BACKEND="$(resolve_backend)"
+
+# Only drive the CLI when it is run, not when a test sources it for its
+# functions.
+if [[ ${BASH_SOURCE[0]} == "${0}" ]]; then
+  main "$@"
+fi
