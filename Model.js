@@ -2,9 +2,29 @@
 // the JSON `omarchy-amnezia status --json` prints and turns it into the
 // strings the panel shows, so the QML stays about layout and state.
 
+// The script bounds its own answer, but the panel is the thing that would
+// suffer, so it does not take the script's word for it. Anything past these
+// ceilings is refused rather than parsed and laid out.
+var maxStatusBytes = 131072
+var maxProfileRows = 64
+var maxFieldChars = 256
+
+function clampText(value) {
+  var text = String(value === undefined || value === null ? "" : value)
+  return text.length > maxFieldChars ? text.substring(0, maxFieldChars) : text
+}
+
+function clampCount(value) {
+  var count = Number(value || 0)
+  return isFinite(count) && count > 0 ? Math.floor(count) : 0
+}
+
 function defaultStatus() {
   return {
     ok: false,
+    tooLarge: false,
+    profileTotal: 0,
+    profileLimit: 0,
     selected: "",
     active: false,
     activeProfile: "",
@@ -22,6 +42,11 @@ function defaultStatus() {
 function parseStatus(raw) {
   var text = String(raw || "").trim()
   if (text === "") return defaultStatus()
+  if (text.length > maxStatusBytes) {
+    var oversized = defaultStatus()
+    oversized.tooLarge = true
+    return oversized
+  }
 
   var parsed
   try {
@@ -30,6 +55,13 @@ function parseStatus(raw) {
     return defaultStatus()
   }
   if (!parsed || typeof parsed !== "object") return defaultStatus()
+  // The script refuses to print an answer past its own ceiling and says so
+  // instead; treat that the same as an answer too large to read.
+  if (typeof parsed.error === "string" && parsed.error !== "") {
+    var refused = defaultStatus()
+    refused.tooLarge = true
+    return refused
+  }
 
   var status = defaultStatus()
   status.ok = true
@@ -43,7 +75,28 @@ function parseStatus(raw) {
   status.rxBytes = Number(parsed.rxBytes || 0)
   status.txBytes = Number(parsed.txBytes || 0)
   status.since = Number(parsed.since || 0)
-  status.profiles = Array.isArray(parsed.profiles) ? parsed.profiles : []
+  status.profileTotal = clampCount(parsed.profileTotal)
+  status.profileLimit = clampCount(parsed.profileLimit)
+  // Every string that reaches a Text element is clamped here, so one long line
+  // in a .conf cannot become one long line in the bar.
+  status.profiles = []
+  var rows = Array.isArray(parsed.profiles) ? parsed.profiles.slice(0, maxProfileRows) : []
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    if (!row || typeof row !== "object") continue
+    status.profiles.push({
+      name: clampText(row.name),
+      protocol: clampText(row.protocol),
+      endpoint: clampText(row.endpoint),
+      address: clampText(row.address),
+      dns: clampText(row.dns),
+      mtu: clampText(row.mtu),
+      active: row.active === true,
+      selected: row.selected === true,
+      rxBytes: Number(row.rxBytes || 0),
+      txBytes: Number(row.txBytes || 0)
+    })
+  }
   if (parsed.tools && typeof parsed.tools === "object") {
     status.tools = {
       backend: String(parsed.tools.backend || ""),
@@ -55,6 +108,14 @@ function parseStatus(raw) {
     }
   }
   return status
+}
+
+// When the script capped the list, say so: configs that quietly went missing
+// would be worse than a shorter list that admits it.
+function configsHeading(status) {
+  var shown = status.profiles.length
+  var total = status.profileTotal
+  return total > shown ? "CONFIGS — SHOWING " + shown + " OF " + total : "CONFIGS"
 }
 
 function protocolLabel(protocol) {
