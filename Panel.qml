@@ -393,7 +393,7 @@ Panel {
 
             PanelSectionHeader {
               visible: amnezia.hasProfiles
-              text: "CONFIGS"
+              text: amnezia.configsHeading
               foreground: root.foreground
               fontFamily: root.fontFamily
             }

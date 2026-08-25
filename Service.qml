@@ -47,6 +47,7 @@ Item {
   // False until the first poll answers, so the panel does not flash an empty
   // state or a missing-tools warning built out of the placeholder status.
   readonly property bool ready: status.ok === true
+  readonly property string configsHeading: Model.configsHeading(status)
   readonly property string backend: status.tools.backend
   // Nothing to install when the AmneziaVPN service is doing the work: it
   // ships its own tunnel binary.
@@ -81,10 +82,20 @@ Item {
     statusProcess.running = true
   }
 
+  // Set when the poll itself is the thing that went wrong, so only that kind
+  // of message is cleared by a poll that succeeds.
+  property bool statusFailed: false
+
+  function readFailed(message) {
+    statusFailed = true
+    lastError = message
+  }
+
   function run(args, desiredState, label) {
     if (controlProcess.running || cliPath === "") return
     desired = desiredState
     actionStatus = label
+    statusFailed = false
     lastError = ""
     controlProcess.command = ["bash", cliPath].concat(args)
     controlProcess.running = true
@@ -93,6 +104,7 @@ Item {
   function up(name) {
     var target = String(name || status.selected || "")
     if (target === "") {
+      statusFailed = false
       lastError = "No config to connect. Import one first."
       return
     }
@@ -157,8 +169,12 @@ Item {
 
   function applyStatus(raw) {
     var parsed = Model.parseStatus(raw)
+    if (parsed.tooLarge) {
+      readFailed("The status answer was too large to read — too many configs?")
+      return
+    }
     if (!parsed.ok) {
-      lastError = "Could not read the Amnezia state"
+      readFailed("Could not read the Amnezia state")
       return
     }
     var serialized = JSON.stringify(parsed.profiles)
@@ -167,6 +183,12 @@ Item {
       profiles = parsed.profiles
     }
     status = parsed
+    // A read that failed should stop being reported once reading works again,
+    // but an error from a click of the user's own stays until it times out.
+    if (statusFailed) {
+      statusFailed = false
+      lastError = ""
+    }
     // Reality caught up with the click — stop overriding it.
     if (desired !== -1 && parsed.active === (desired === 1)) desired = -1
     if (pendingSelection !== "" && parsed.selected === pendingSelection) pendingSelection = ""
@@ -217,7 +239,7 @@ Item {
     onExited: function(exitCode) {
       root.refreshing = false
       if (exitCode === 0) root.applyStatus(statusStdout.text)
-      else root.lastError = Model.commandError(exitCode, statusStderr.text, statusStdout.text)
+      else root.readFailed(Model.commandError(exitCode, statusStderr.text, statusStdout.text))
     }
   }
 
@@ -229,6 +251,7 @@ Item {
     stderr: StdioCollector { id: controlStderr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode === 0) {
+        root.statusFailed = false
         root.lastError = ""
         root.actionStatus = ""
       } else {

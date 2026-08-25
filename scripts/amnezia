@@ -47,6 +47,15 @@ fi
 # awg-quick names the interface after the config file, and only accepts these.
 NAME_PATTERN='^[a-zA-Z0-9_=+.-]{1,15}$'
 
+# The panel polls `status --json` every few seconds and the answer lands in
+# omarchy-shell, a long-lived process shared with the rest of the desktop. So
+# the answer is bounded here, at the producer: a directory full of configs, or
+# one config with a megabyte on a line, must not turn into unbounded output
+# arriving on a timer. The panel enforces its own ceiling as well.
+MAX_PROFILES=64
+MAX_FIELD_CHARS=128
+MAX_JSON_BYTES=65536
+
 die() {
   echo "$PROGRAM: $*" >&2
   exit 1
@@ -78,6 +87,12 @@ profile_exists() {
 # that cannot become an interface is skipped rather than listed and then
 # refused on click.
 profile_names() {
+  all_profile_names | head -n "$MAX_PROFILES"
+}
+
+# Every name on disk, for counting. Only `profile_names` feeds the readers, so
+# nothing past the cap is ever opened.
+all_profile_names() {
   local path name
   shopt -s nullglob
   for path in "$PROFILE_DIR"/*.conf; do
@@ -86,6 +101,10 @@ profile_names() {
     valid_name "$name" && printf '%s\n' "$name"
   done
   shopt -u nullglob
+}
+
+profile_count() {
+  all_profile_names | wc -l | tr -d ' '
 }
 
 # Everything the panel needs out of one .conf, in one pass:
@@ -98,7 +117,7 @@ profile_names() {
 # refreshes on a timer, and a bar widget has no business spawning a process
 # per field.
 conf_fields() {
-  awk '
+  awk -v maxfield="$MAX_FIELD_CHARS" '
     {
       line = $0
       sub(/#.*/, "", line)
@@ -111,6 +130,9 @@ conf_fields() {
       gsub(/\t/, " ", value)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
       if (value == "") next
+      # A hand-written or hostile .conf can put anything on a line; the panel
+      # only ever displays these, so a display-sized slice is all it gets.
+      value = substr(value, 1, maxfield)
       if (key == "endpoint" && endpoint == "") endpoint = value
       else if (key == "address" && address == "") address = value
       else if (key == "dns" && dns == "") dns = value
@@ -396,7 +418,7 @@ is_connected() {
 
 cmd_list() {
   if [[ ${1:-} == --json ]]; then
-    profiles_json
+    emit_json "$(profiles_json)"
     return
   fi
   local name active protocol endpoint
@@ -434,6 +456,19 @@ profiles_json() {
       })'
 }
 
+# Every JSON answer the panel reads goes through here: if it somehow grew past
+# the ceiling anyway, the panel gets a short refusal instead of a flood.
+emit_json() {
+  local payload="$1" bytes
+  bytes="$(printf '%s' "$payload" | wc -c)"
+  if ((bytes > MAX_JSON_BYTES)); then
+    jq -nc --argjson limit "$MAX_JSON_BYTES" --argjson size "$bytes" \
+      '{error: "status output exceeded the size cap", limitBytes: $limit, bytes: $size}'
+    return 0
+  fi
+  printf '%s\n' "$payload"
+}
+
 cmd_status() {
   local active selected path protocol rx=0 tx=0 since=0 connected=false
   active="$(active_profile)"
@@ -459,8 +494,14 @@ cmd_status() {
   [[ -n $selected && -f $path ]] && protocol="$(protocol_of "$path")"
 
   if [[ ${1:-} != --json ]]; then
-    local via
-    [[ $BACKEND == daemon ]] && via="via the AmneziaVPN service" || via="via $(quick_tool "${protocol:-awg}")"
+    local via tool
+    if [[ $BACKEND == daemon ]]; then
+      via="via the AmneziaVPN service"
+    else
+      # Nothing installed yet reads better as a gap than as a dangling "via".
+      tool="$(quick_tool "${protocol:-awg}")"
+      [[ -n $tool ]] && via="via $tool" || via="(no tunnel tool installed)"
+    fi
     if [[ -n $active ]]; then
       echo "connected: $active ($(protocol_of "$(profile_path "$active")")) $via"
     elif [[ $connected == true ]]; then
@@ -473,10 +514,14 @@ cmd_status() {
     return 0
   fi
 
-  jq -n \
+  local total
+  total="$(profile_count)"
+  emit_json "$(jq -n \
     --arg selected "${selected:-}" \
     --arg activeProfile "${active:-}" \
     --arg protocol "$protocol" \
+    --argjson profileTotal "${total:-0}" \
+    --argjson profileLimit "$MAX_PROFILES" \
     --argjson active "$connected" \
     --argjson activeForeign "$([[ $connected == true && -z $active ]] && printf 'true' || printf 'false')" \
     --argjson rxBytes "${rx:-0}" \
@@ -486,7 +531,8 @@ cmd_status() {
     --argjson tools "$(tools_json)" \
     '{selected: $selected, active: $active, activeProfile: $activeProfile,
       activeForeign: $activeForeign, protocol: $protocol, rxBytes: $rxBytes,
-      txBytes: $txBytes, since: $since, profiles: $profiles, tools: $tools}'
+      txBytes: $txBytes, since: $since, profileTotal: $profileTotal,
+      profileLimit: $profileLimit, profiles: $profiles, tools: $tools}')"
 }
 
 tools_json() {

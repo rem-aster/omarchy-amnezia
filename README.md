@@ -10,14 +10,9 @@ Left click opens the panel, right click on the icon connects or disconnects. One
 omarchy plugin add https://github.com/rem-aster/omarchy-amnezia.git --enable
 ```
 
-**If the Amnezia app is installed, continue with adding config** — the plugin drives the service its installer already set up, and asks for no password. Otherwise install the tunnel tools, and each connect shows one polkit dialog:
+**If the Amnezia app is installed, continue with adding config** — the plugin drives the service its installer already set up, and asks for no password.
 
-```bash
-yay -S amneziawg-tools amneziawg-dkms   # AmneziaWG configs
-sudo pacman -S wireguard-tools          # plain WireGuard configs
-```
-
-`./scripts/amnezia doctor` in the plugin directory reports what is missing.
+Without the app, the tunnel tools have to be on the box and each connect shows one polkit dialog. AmneziaWG configs need `amneziawg-tools` and `amneziawg-dkms` (AUR); plain WireGuard configs need `wireguard-tools`. Install them with your usual package manager — the plugin never installs anything itself. `./scripts/amnezia doctor` in the plugin directory reports what is missing.
 
 ## Add a config
 
