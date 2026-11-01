@@ -92,7 +92,7 @@ class Busy(Exception):
 
 @contextlib.contextmanager
 def locked(wait=0.0):
-    """One change at a time across the TUI, the bar and the CLI."""
+    """One change at a time across the panel, the bar and the CLI."""
     ensure_dirs()
     fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o600)
     deadline = time.monotonic() + wait

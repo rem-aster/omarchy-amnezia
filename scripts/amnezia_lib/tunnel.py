@@ -287,7 +287,7 @@ def daemon_down():
 def run_root(args):
     """One privileged step: amnezia-root through pkexec, so the session's
     polkit agent asks. stdin is closed so pkexec never falls back to asking on
-    the terminal (that would land in the middle of the TUI)."""
+    a terminal nobody is looking at)."""
     if os.geteuid() == 0:
         command = ["bash", ROOT_HELPER] + args
     elif have("pkexec"):

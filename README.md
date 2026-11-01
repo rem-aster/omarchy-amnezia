@@ -2,21 +2,10 @@
 
 Amnezia Premium in the [Omarchy](https://omarchy.org) bar. Paste your Premium key once, then pick a location and a protocol — **AmneziaWG** or **VLESS** — and connect, without the Amnezia app's window.
 
-- **Bar icon** — a shield that lights up when connected, with the country code next to it. Left click opens the dashboard, right click connects to your picked location or disconnects, middle click refreshes. The tooltip shows the location, protocol, traffic and uptime.
-- **Dashboard** — a terminal UI in a floating window: every location your subscription offers with the protocols it speaks, details of the one under the cursor, and your subscription (valid until, device slots). A second screen lists the devices holding a slot and frees one you no longer use.
-
-```
- Amnezia Premium                                                         v2.0.0
- Connected  🇩🇪 Germany · AmneziaWG · 12m · ↓ 12 MB  ↑ 3.1 MB
-
- ╭─ Locations · 51 ──────────────────╮  ╭─ Details ───────────────────────────╮
- │      🇫🇮 Finland             AWG  │  │  Status      Connected · 12m         │
- │  › ● 🇩🇪 Germany       AWG VLESS  │  │  Location    🇩🇪 Germany  (de)        │
- │      🇳🇱 Netherlands   AWG VLESS  │  │  Protocol    ▸ AmneziaWG    VLESS    │
- │      🇺🇸 USA (East)        VLESS  │  │  Endpoint    203.0.113.10:47213      │
- ╰───────────────────────────────────╯  ╰──────────────────────────────────────╯
- enter connect • p protocol • / filter • a account • ? help • q quit
-```
+- **Bar icon** — a shield that lights up when connected, with the country code next to it. Left click opens the panel, right click connects to your picked location or disconnects, middle click re-reads the state. The tooltip shows the location, protocol, traffic and uptime.
+- **Panel** — built from the same pieces as Omarchy's Wi-Fi, Bluetooth and Tailscale panels, so it wears your theme. The hero carries the one switch; under it the live connection (server, address, DNS), download and upload with a one-minute graph, and the protocol switch. Two tabs below:
+  - **Locations** — your recent places, then every location the subscription offers with the protocols it speaks, and a filter (`/`). A click connects; on a live tunnel it moves the tunnel there.
+  - **Account** — valid until, device slots, renewal, a fresh config for the current location, replacing or forgetting the key, and the list of devices holding a slot, each of which you can free.
 
 ## Install
 
@@ -24,7 +13,7 @@ Amnezia Premium in the [Omarchy](https://omarchy.org) bar. Paste your Premium ke
 omarchy plugin add https://github.com/rem-aster/omarchy-amnezia.git --enable
 ```
 
-Then click the icon and paste your key — it starts with `vpn://`; the Amnezia app shows it under your subscription's **Share / Export key**, and it came with the purchase e-mail. Or from a terminal:
+Then click the icon and paste your key into the panel — it starts with `vpn://`; the Amnezia app shows it under your subscription's **Share**, and it came with the purchase e-mail. Or from a terminal:
 
 ```bash
 ~/.config/omarchy/plugins/rem-aster.amnezia/scripts/amnezia key 'vpn://…'
@@ -42,7 +31,7 @@ What each protocol needs on the machine:
 
 ## Using it
 
-In the dashboard: **enter** connects to the location under the cursor (or disconnects it), **p** switches between AmneziaWG and VLESS — a live tunnel moves over right away — **/** filters, **R** asks for a fresh config, **a** opens the account screen (**x** frees a device slot, **o** opens the renewal page, **k** replaces the key). **?** lists everything; **q** closes the window and leaves the tunnel up.
+The panel is mouse- and keyboard-driven, like the built-in ones: `j`/`k` or the arrows walk every row top to bottom, `h`/`l` move between the protocol chips and the tabs or fold a list from its header, `Enter` acts, `/` jumps to the location filter, `t` flips the tab, `r` asks Amnezia again, `Esc` backs out, `q` closes. No single letter touches the tunnel — the panel takes the keyboard when it opens, and a stray key must not change your connection. Freeing a device slot, forgetting the key and replacing a config each ask first.
 
 The same from a terminal (`scripts/amnezia` in the plugin directory):
 
@@ -56,13 +45,13 @@ amnezia status
 amnezia account | devices | revoke <id> | renew | renewal | export <cc> | forget
 ```
 
-`omarchy-shell amnezia open | toggle | refresh | status` reaches the widget.
+`omarchy-shell amnezia open | close | toggle | up [cc] | down | vpnToggle | protocol <awg|vless> | refresh | status` reaches the widget.
 
 ## How it works
 
 The plugin speaks to Amnezia's API gateway the way the app's `GatewayController` does — the request is AES-256 encrypted under a one-time key that is wrapped with the gateway's RSA public key (`scripts/amnezia_lib/gateway-public.pem`, the one every AmneziaVPN build carries). When `gw.amnezia.org` is unreachable it falls back to the same mirror gateways the app uses. Everything is in Python's standard library; nothing to install for that part.
 
-Like the app, the plugin is one **device** of your subscription: it makes an installation id once and reuses it for every location and protocol, so it takes one slot (two if the app also runs on this machine). Configs are issued per location and protocol on first use and kept; **R** replaces one. A brand-new config can take a minute or two before the server lets traffic through.
+Like the app, the plugin is one **device** of your subscription: it makes an installation id once and reuses it for every location and protocol, so it takes one slot (two if the app also runs on this machine). Configs are issued per location and protocol on first use and kept; **New config** on the Account tab replaces one. A brand-new config can take a minute or two before the server lets traffic through.
 
 - **AmneziaWG** goes to the AmneziaVPN service over its local socket when the app is installed; that service runs as root and accepts commands from any local process, which is what makes it prompt-free. Without it, `awg-quick` runs through `pkexec`. `amnezia backend quick` forces the second.
 - **VLESS** runs `xray` with a TUN inbound as a transient systemd unit (`omarchy-amnezia-vless`), started through `pkexec` by `scripts/amnezia-root`. Everything except the server goes into the tunnel, DNS points into it (systemd-resolved or resolvconf), and IPv6 is blocked while it is up so nothing leaks around it. Stopping the unit undoes all of that.
@@ -102,7 +91,7 @@ Nothing third-party is bundled. The plugin calls, when present:
 | polkit (`pkexec`) | the root steps | LGPL-2.0 |
 | systemd (`systemd-run`, `resolvectl`), iproute2 | the VLESS tunnel's unit, DNS and routes | LGPL-2.1 / GPL-2.0 |
 
-Tests (no network, no root): `cd tests && python3 -B -m unittest`.
+Tests (no network, no root): `cd tests && python3 -B -m unittest`, and `node tests/model.test.js` for the panel's model.
 
 Upgrading from 1.x: plain `.conf` configs are no longer used; the old `~/.config/omarchy/amnezia/configs/` can be deleted.
 

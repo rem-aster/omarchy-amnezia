@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """amnezia — Amnezia Premium from the Omarchy bar and the terminal.
 
-Run with no arguments in a terminal for the dashboard; `amnezia help` lists
-the commands. The bar widget runs `amnezia status --json` on a timer and
-`amnezia open` / `amnezia toggle` on clicks.
+`amnezia help` lists the commands. The panel in the bar runs
+`amnezia state` to draw itself and the other verbs to act.
 """
 
 import os
