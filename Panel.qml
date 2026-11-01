@@ -375,13 +375,30 @@ Panel {
     }
   }
 
+  readonly property bool barVertical: bar ? bar.vertical === true : false
+  readonly property string barLabel: showLocationCode && amnezia.state.connected && !amnezia.state.foreign && !barVertical
+    ? amnezia.state.country.split("-")[0].toUpperCase() : ""
+
+  // BarIconButton is one icon wide whatever it holds, and draws its label
+  // beside the icon: a country code would spill over both edges and eat the
+  // gap to the neighbours. The slot grows by exactly what the label adds —
+  // its width and the 4px the button puts between label and icon — so the
+  // padding on each side stays that of every other icon in the bar.
+  TextMetrics {
+    id: barLabelMetrics
+    font.family: button.fontFamily
+    font.pixelSize: button.fontSize
+    text: root.barLabel
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: amnezia.working ? root.loadingGlyph : (amnezia.connected ? root.shieldOn : root.shieldOff)
-    labelText: root.showLocationCode && amnezia.state.connected && !amnezia.state.foreign && !root.vertical
-      ? amnezia.state.country.split("-")[0].toUpperCase() : ""
+    labelText: root.barLabel
+    slotSize: Style.bar.iconSlot
+      + (root.barLabel !== "" ? Math.ceil(barLabelMetrics.advanceWidth) + Style.space(4) : 0)
     dimmed: !amnezia.connected && !amnezia.working
     tooltipText: Model.barTooltip(amnezia.state, amnezia.actionStatus, amnezia.lastError, root.nowMs)
     onPressed: function(buttonCode) {
