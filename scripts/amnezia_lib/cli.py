@@ -1,8 +1,8 @@
-"""Command line: every action of the dashboard, scriptable."""
+"""Command line: every action of the panel, scriptable. The panel itself
+runs these — `state --json` to draw, the verbs to act."""
 
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -12,15 +12,14 @@ from . import app, store, tunnel
 from .premium import Premium, PremiumError, protocol_label, PROTOCOLS
 
 PROGRAM = "amnezia"
-SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "amnezia")
-TUI_TITLE = "omarchy-amnezia"
 
 USAGE = """Usage: amnezia [command]
 
-  (none) / tui              the dashboard (in a terminal)
-  open                      the dashboard in a floating terminal, as the bar does
-  status [--json]           what is connected
-  key [vpn://…|file|-]      set your Amnezia Premium key (asks when no argument)
+  status [--json]           what is connected (the default)
+  state                     everything the panel draws, as JSON (no network)
+  refresh                   ask Amnezia for the subscription again, then print `state`
+  key [vpn://…|file|-]      set your Amnezia Premium key (asks when no argument;
+                            --env reads it from $AMNEZIA_KEY)
   account [--refresh]       subscription: valid until, device slots
   locations [--json]        the locations and the protocols each one offers
   use <cc> [awg|vless]      pick a location (and protocol); a live tunnel moves to it
@@ -139,23 +138,6 @@ def run_action(fn, *args, **kwargs):
         return fail(error)
 
 
-def cmd_open(_args):
-    """The dashboard in a floating terminal; an open one is focused instead."""
-    python = sys.executable or "python3"
-    # TUI.float is the app id Omarchy's window rules float; the window title
-    # the dashboard sets is what finds an open one to focus.
-    inner = "omarchy-launch-tui --app-id=TUI.float %s %s tui" % (shlex.quote(python), shlex.quote(SCRIPT))
-    if shutil.which("omarchy-launch-or-focus") and shutil.which("omarchy-launch-tui"):
-        command = ["omarchy-launch-or-focus", TUI_TITLE, inner]
-    elif shutil.which("xdg-terminal-exec"):
-        command = ["xdg-terminal-exec", "--app-id=TUI.float", "-e", python, SCRIPT, "tui"]
-    else:
-        return fail("no terminal launcher found (omarchy-launch-tui or xdg-terminal-exec)")
-    subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
-    return 0
-
-
 def cmd_export(args):
     if not args:
         return fail("usage: amnezia export <cc> [file]")
@@ -228,20 +210,28 @@ def cmd_doctor(_args):
 def main(argv):
     command = argv[0] if argv else ""
     args = argv[1:]
-    if command in ("", "tui"):
-        if not sys.stdout.isatty():
-            return cmd_status(args)
-        from . import tui
-        return tui.run()
     if command in ("-h", "--help", "help"):
         print(USAGE, end="")
         return 0
-    if command == "status":
+    if command in ("", "status"):
         return cmd_status(args)
-    if command == "open":
-        return cmd_open(args)
+    if command == "state":
+        print(json.dumps(app.state_dict(), ensure_ascii=False))
+        return 0
+    if command == "refresh":
+        try:
+            app.refresh_account()
+        except app.ActionError as error:
+            return fail(error)
+        print(json.dumps(app.state_dict(), ensure_ascii=False))
+        return 0
     if command == "key":
-        text = read_key_argument(args[0] if args else None)
+        # The panel hands the key over in the environment: unlike the
+        # command line, /proc/<pid>/environ is readable by this user only.
+        if args and args[0] == "--env":
+            text = os.environ.pop("AMNEZIA_KEY", "").strip()
+        else:
+            text = read_key_argument(args[0] if args else None)
         if not text:
             return fail("no key given")
         return run_action(app.set_key, text)

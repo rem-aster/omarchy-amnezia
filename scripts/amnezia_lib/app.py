@@ -1,7 +1,8 @@
-"""What a click does: the actions the CLI, the TUI and the bar share.
+"""What a click does: the actions the panel and the CLI share.
 
 Every action that changes something runs under one lock, so a right click on
-the bar during a switch in the TUI is refused instead of interleaved.
+the bar during a switch started from the panel waits its turn instead of
+interleaving with it.
 """
 
 import os
@@ -13,8 +14,22 @@ from . import store, tunnel
 from .premium import Premium, PremiumError, protocol_label, flag, PROTOCOLS
 
 
+RECENT_MAX = 3
+MAX_COUNTRIES = 120
+MAX_DEVICES = 32
+
+
 class ActionError(Exception):
     pass
+
+
+def _remember(premium, country, protocol):
+    """Recent locations, newest first: the panel pins them above the list."""
+    recent = [r for r in premium.settings.get("recent") or []
+              if isinstance(r, dict) and r.get("country") and r.get("country") != country]
+    recent.insert(0, {"country": country, "protocol": protocol, "at": int(time.time())})
+    premium.settings["recent"] = recent[:RECENT_MAX]
+    premium.save()
 
 
 def poke_bar():
@@ -75,6 +90,7 @@ def connect(country=None, protocol=None, renew=False):
         country = record["country"]
     premium.choose(country=country, protocol=protocol)
     backend = tunnel.up(record, premium.settings.get("awg_backend", "auto"))
+    _remember(premium, country, protocol)
     store.log("connected %s/%s via %s" % (country, protocol, backend))
     name = (info or {}).get("name") or record.get("country_name") or country.upper()
     return "Connected to %s over %s" % (name, protocol_label(protocol))
@@ -199,12 +215,70 @@ def status_dict():
         "rx": live["rx"],
         "tx": live["tx"],
         "since": live["since"],
+        "iface": live["iface"],
         "endpoint": (record or {}).get("endpoint", ""),
         "endDate": account["end_date"][:10],
         "daysLeft": days_left,
-        "devices": "%d/%d" % (account["active_devices"], account["max_devices"]) if account["max_devices"] else "",
+        "deviceSlots": "%d/%d" % (account["active_devices"], account["max_devices"]) if account["max_devices"] else "",
         "locations": len(account["countries"]),
     }
+
+
+def _config_summaries(premium):
+    out = {}
+    if not os.path.isdir(store.CONFIGS):
+        return out
+    for name in sorted(os.listdir(store.CONFIGS))[:2 * MAX_COUNTRIES]:
+        if not name.endswith(".json"):
+            continue
+        country, _, protocol = name[:-5].rpartition("-")
+        record = premium.cached_config(country, protocol)
+        if not record:
+            continue
+        out["%s-%s" % (country, protocol)] = {
+            "endpoint": str(record.get("endpoint") or "")[:120],
+            "address": str(record.get("address") or "")[:64],
+            "transport": str(record.get("transport") or "")[:40],
+            "dns": ", ".join(record.get("dns") or [])[:80],
+            "issuedAt": int(record.get("issued_at") or 0),
+        }
+    return out
+
+
+def state_dict():
+    """Everything the panel draws, from local files only: the live tunnel,
+    the subscription as last seen, the locations and devices, recent picks,
+    and the configs this device already holds. Bounded, so a poll stays small."""
+    premium = Premium()
+    info = status_dict()
+    account = premium.normalize_account(store.read_json(store.ACCOUNT, {}) or {})
+    codes = {c["code"] for c in account["countries"]}
+    preference = premium.settings.get("awg_backend", "auto")
+    info.update({
+        "plan": premium.settings.get("name") or premium.settings.get("service_type") or "",
+        "description": premium.settings.get("description") or "",
+        "picked": {"country": premium.country, "protocol": premium.protocol},
+        "awgBackend": tunnel.awg_backend(preference),
+        "awgBackendSetting": preference,
+        "xray": tunnel.have("xray"),
+        "pkexec": tunnel.have("pkexec"),
+        "deviceId": premium.settings.get("installation_uuid") or "",
+        "account": {
+            "known": account["known"],
+            "fetchedAt": account["fetched_at"],
+            "endDate": account["end_date"][:10],
+            "activeDevices": account["active_devices"],
+            "maxDevices": account["max_devices"],
+            "renewal": account["renewal"],
+            "support": account["support"],
+        },
+        "countries": account["countries"][:MAX_COUNTRIES],
+        "devices": account["devices"][:MAX_DEVICES],
+        "recent": [r for r in premium.settings.get("recent") or []
+                   if isinstance(r, dict) and r.get("country") in codes][:RECENT_MAX],
+        "configs": _config_summaries(premium),
+    })
+    return info
 
 
 def format_bytes(value):

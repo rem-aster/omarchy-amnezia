@@ -5,24 +5,25 @@
   "version": "2.0.0",
   "author": "rem-aster",
   "license": "MIT",
-  "description": "Amnezia Premium in the Omarchy bar: pick a location, pick AmneziaWG or VLESS, connect — from a status icon and a terminal dashboard.",
+  "description": "Amnezia Premium in the Omarchy bar: pick a location, pick AmneziaWG or VLESS, connect — from a native panel with live traffic, recent places and your device slots.",
   "homepage": "https://github.com/rem-aster/omarchy-amnezia",
   "kinds": [
     "bar-widget"
   ],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
+    "barWidget": "Panel.qml"
   },
   "barWidget": {
     "displayName": "Amnezia",
-    "description": "Amnezia Premium status. Click for the dashboard (locations, protocol, devices); right click to connect or disconnect.",
+    "description": "Amnezia Premium: click for the panel (locations, protocol, traffic, account and devices); right click connects to the picked location or disconnects.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 5,
       "showLocation": "On",
-      "rightClick": "Toggle"
+      "rightClick": "Toggle",
+      "notifications": "On"
     },
     "schema": [
       {
@@ -33,7 +34,7 @@
         "max": 600,
         "step": 1,
         "defaultValue": 5,
-        "description": "How often the icon re-reads the tunnel state. Reading it costs no network."
+        "description": "How often the icon re-reads the tunnel state. Reading it costs no network; traffic is sampled every second while the panel is open."
       },
       {
         "key": "showLocation",
@@ -55,7 +56,18 @@
           "Nothing"
         ],
         "defaultValue": "Toggle",
-        "description": "Toggle connects to the picked location or disconnects. Nothing makes right click open the dashboard too."
+        "description": "Toggle connects to the picked location or disconnects. Nothing makes right click open the panel too."
+      },
+      {
+        "key": "notifications",
+        "type": "enum",
+        "label": "Desktop notifications",
+        "options": [
+          "On",
+          "Off"
+        ],
+        "defaultValue": "On",
+        "description": "When On, a connect or disconnect started from the bar icon (with the panel closed) reports how it went."
       }
     ]
   }

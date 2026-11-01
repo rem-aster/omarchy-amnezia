@@ -284,6 +284,18 @@ class GatewayRoundTripTest(unittest.TestCase):
                 self.assertEqual(json.load(handle)["inbounds"][0]["protocol"], "tun")
             self.assertEqual(premium.Premium().protocol, "vless")
 
+            # What the panel draws: recent picks newest first, one entry per
+            # location, and the configs this device holds.
+            state = app.state_dict()
+            self.assertEqual(state["recent"][0], {"country": "de", "protocol": "vless", "at": state["recent"][0]["at"]})
+            self.assertEqual(len(state["recent"]), 1)
+            self.assertIn("de-awg", state["configs"])
+            self.assertIn("de-vless", state["configs"])
+            self.assertEqual(state["configs"]["de-vless"]["endpoint"], "203.0.113.20:443")
+            self.assertEqual(state["picked"], {"country": "de", "protocol": "vless"})
+            self.assertTrue(state["account"]["known"])
+            self.assertLess(len(json.dumps(state)), 65536)
+
             # A location that only speaks VLESS keeps the protocol, and one
             # that does not offer the asked protocol falls back.
             app.choose(protocol="awg")
