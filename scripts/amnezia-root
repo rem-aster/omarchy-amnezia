@@ -1,0 +1,203 @@
+#!/bin/bash
+
+# amnezia-root — the only part of the plugin that runs as root.
+#
+# The plugin runs it through pkexec, so each call is one polkit prompt and
+# nothing of the plugin stays root between them. It does three things:
+#
+#   up-vless <xray.json> <server-ip> <dns1> [dns2]
+#       Xray with a TUN inbound as a transient systemd unit. Everything but
+#       the server goes into the TUN, DNS points into it, IPv6 is blocked
+#       while it runs (Premium VLESS servers carry IPv4; a TUN proxy would
+#       otherwise "accept" every IPv6 connection and then drop it). The
+#       unit's stop hooks undo the routes, so `systemctl stop` alone is a
+#       clean disconnect — and so is Xray dying.
+#   up-awg <file.conf>
+#       awg-quick, for machines without the AmneziaVPN service.
+#   down
+#       Whichever of the two is up.
+#
+# Each `up-*` takes the other tunnel down first: one tunnel at a time. Config
+# files are copied into /run/omarchy-amnezia (root, 700) before use, so the
+# file that runs is the file that was checked.
+
+set -uo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+UNIT="omarchy-amnezia-vless"
+TUN="amnvless"
+TUN_V4="10.233.233.1/30"
+AWG_IFACE="amnezia"
+STATE_DIR="/run/omarchy-amnezia"
+
+die() {
+  echo "amnezia-root: $*" >&2
+  exit 1
+}
+
+[[ $EUID -eq 0 ]] || die "run through pkexec"
+
+valid_ipv4() {
+  local IFS=. octet
+  [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  for octet in $1; do ((octet <= 255)) || return 1; done
+}
+
+valid_dns() {
+  valid_ipv4 "$1" || [[ $1 =~ ^[0-9a-fA-F:]{2,39}$ ]]
+}
+
+# The file the user handed over, copied where only root can change it. It has
+# to belong to the user pkexec says called us (or to root) and be a plain file.
+take_file() {
+  local source="$1" target="$2" owner
+  [[ -f $source && ! -L $source ]] || die "no such file: $source"
+  owner="$(stat -c %u -- "$source")" || die "cannot read $source"
+  [[ $owner == 0 || $owner == "${PKEXEC_UID:-0}" ]] || die "$source does not belong to you"
+  mkdir -p -- "$STATE_DIR" && chmod 700 -- "$STATE_DIR" || die "cannot create $STATE_DIR"
+  install -m 600 -o root -g root -- "$source" "$target" || die "cannot copy $source"
+}
+
+stop_vless() {
+  if systemctl list-units --all --plain --no-legend "$UNIT.service" 2>/dev/null | grep -q .; then
+    systemctl stop "$UNIT.service" 2>/dev/null
+    systemctl reset-failed "$UNIT.service" 2>/dev/null
+  fi
+  # A unit that died without its stop hooks (killed with SIGKILL, say) can
+  # leave its interface behind; the routes on it go with it.
+  [[ -d /sys/class/net/$TUN ]] && ip link delete "$TUN" 2>/dev/null
+  rm -f -- "$STATE_DIR/xray.json"
+}
+
+stop_awg() {
+  if [[ -d /sys/class/net/$AWG_IFACE && ! -e /sys/class/net/$AWG_IFACE/device ]]; then
+    if [[ -f $STATE_DIR/$AWG_IFACE.conf ]] && command -v awg-quick >/dev/null; then
+      awg-quick down "$STATE_DIR/$AWG_IFACE.conf" >/dev/null 2>&1 || ip link delete "$AWG_IFACE" 2>/dev/null
+    else
+      ip link delete "$AWG_IFACE" 2>/dev/null
+    fi
+  fi
+  rm -f -- "$STATE_DIR/$AWG_IFACE.conf"
+}
+
+stop_all() {
+  stop_vless
+  stop_awg
+}
+
+up_vless() {
+  local source="${1:-}" server="${2:-}" dns1="${3:-}" dns2="${4:-}"
+  [[ -n $source && -n $server && -n $dns1 ]] || die "usage: up-vless <xray.json> <server-ip> <dns1> [dns2]"
+  valid_ipv4 "$server" || die "not an IPv4 address: $server"
+  valid_dns "$dns1" || die "not a DNS server address: $dns1"
+  [[ -z $dns2 ]] || valid_dns "$dns2" || die "not a DNS server address: $dns2"
+  local xray ip_bin
+  xray="$(command -v xray)" || die "xray is not installed — sudo pacman -S xray"
+  ip_bin="$(command -v ip)" || die "iproute2 is missing"
+
+  stop_all
+  take_file "$source" "$STATE_DIR/xray.json"
+
+  local check
+  if ! check="$("$xray" run -test -c "$STATE_DIR/xray.json" 2>&1)"; then
+    if grep -qi 'unknown.*tun\|tun.*unknown\|not.*registered' <<<"$check"; then
+      die "this xray has no TUN inbound — update it (sudo pacman -Syu xray)"
+    fi
+    die "xray rejected the config: $(grep -v '^\s*$' <<<"$check" | tail -n 1)"
+  fi
+
+  # The server keeps its route through the link it is reachable on now, or
+  # Xray would send its own packets into the TUN it serves.
+  local route via dev
+  route="$(ip -4 route get "$server" 2>/dev/null | head -n 1)"
+  via="$(sed -n 's/.* via \([0-9.]*\).*/\1/p' <<<"$route")"
+  dev="$(sed -n 's/.* dev \([^ ]*\).*/\1/p' <<<"$route")"
+  [[ -n $dev ]] || die "no route to $server — is the network up?"
+  [[ $dev != "$TUN" ]] || die "the route to $server already points into the tunnel"
+  if [[ -n $via ]]; then
+    ip route replace "$server/32" via "$via" dev "$dev" || die "cannot route $server via $dev"
+  else
+    ip route replace "$server/32" dev "$dev" || die "cannot route $server via $dev"
+  fi
+
+  local -a hooks=(
+    -p "ExecStopPost=-$ip_bin route del $server/32"
+    -p "ExecStopPost=-$ip_bin -6 route del unreachable ::/1"
+    -p "ExecStopPost=-$ip_bin -6 route del unreachable 8000::/1"
+  )
+  local dns_mode=""
+  if command -v resolvectl >/dev/null && systemctl is-active --quiet systemd-resolved; then
+    dns_mode="resolved"
+  elif command -v resolvconf >/dev/null; then
+    dns_mode="resolvconf"
+    hooks+=(-p "ExecStopPost=-$(command -v resolvconf) -d $TUN -f")
+  fi
+
+  if ! systemd-run --quiet --collect --unit="$UNIT" \
+      --description="Amnezia Premium VLESS tunnel (omarchy-amnezia)" \
+      -p Restart=no -p KillMode=mixed "${hooks[@]}" \
+      "$xray" run -c "$STATE_DIR/xray.json"; then
+    ip route del "$server/32" 2>/dev/null
+    die "could not start xray"
+  fi
+
+  local tries=0
+  until [[ -d /sys/class/net/$TUN ]]; do
+    if ((tries >= 40)) || ! systemctl is-active --quiet "$UNIT"; then
+      local why
+      why="$(journalctl -u "$UNIT" -n 3 --no-pager -o cat 2>/dev/null | tr '\n' ' ')"
+      stop_vless
+      ip route del "$server/32" 2>/dev/null
+      die "xray did not bring its TUN up${why:+: $why}"
+    fi
+    sleep 0.2
+    tries=$((tries + 1))
+  done
+
+  ip link set "$TUN" up 2>/dev/null
+  ip addr replace "$TUN_V4" dev "$TUN" 2>/dev/null
+  ip route replace 0.0.0.0/1 dev "$TUN" || { stop_vless; die "cannot route through $TUN"; }
+  ip route replace 128.0.0.0/1 dev "$TUN" || { stop_vless; die "cannot route through $TUN"; }
+  # More specific than any default route, less than the LAN's own routes.
+  ip -6 route replace unreachable ::/1 2>/dev/null
+  ip -6 route replace unreachable 8000::/1 2>/dev/null
+
+  case "$dns_mode" in
+    resolved)
+      resolvectl dns "$TUN" "$dns1" ${dns2:+"$dns2"} &&
+        resolvectl domain "$TUN" '~.' &&
+        resolvectl default-route "$TUN" yes ||
+        echo "amnezia-root: warning: could not point DNS at the tunnel" >&2
+      ;;
+    resolvconf)
+      printf 'nameserver %s\n' "$dns1" ${dns2:+"$dns2"} | resolvconf -a "$TUN" -m 0 -x 2>/dev/null ||
+        echo "amnezia-root: warning: could not point DNS at the tunnel" >&2
+      ;;
+    *)
+      echo "amnezia-root: warning: no systemd-resolved or resolvconf; DNS stays as it was" >&2
+      ;;
+  esac
+  echo "up"
+}
+
+up_awg() {
+  local source="${1:-}"
+  [[ -n $source ]] || die "usage: up-awg <file.conf>"
+  command -v awg-quick >/dev/null || die "awg-quick is missing — install amneziawg-tools, or the AmneziaVPN app"
+  stop_all
+  take_file "$source" "$STATE_DIR/$AWG_IFACE.conf"
+  local out
+  if ! out="$(awg-quick up "$STATE_DIR/$AWG_IFACE.conf" 2>&1)"; then
+    stop_awg
+    die "awg-quick failed: $(grep -v '^\[#\]' <<<"$out" | grep -v '^\s*$' | tail -n 1)"
+  fi
+  echo "up"
+}
+
+case "${1:-}" in
+  up-vless) shift; up_vless "$@" ;;
+  up-awg) shift; up_awg "$@" ;;
+  down) stop_all; echo "down" ;;
+  *) die "usage: amnezia-root up-vless <xray.json> <server-ip> <dns1> [dns2] | up-awg <file.conf> | down" ;;
+esac
