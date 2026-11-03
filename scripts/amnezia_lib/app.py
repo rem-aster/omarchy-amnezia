@@ -47,7 +47,7 @@ def _wrap(fn):
     def run(*args, **kwargs):
         try:
             # A short wait rides over the moment a status poll peeks at the lock.
-            with store.locked(wait=kwargs.pop("wait", 2.0)):
+            with store.locked(wait=kwargs.pop("wait", 2.0), action=fn.__name__):
                 return fn(*args, **kwargs)
         except store.Busy as error:
             raise ActionError(str(error))
@@ -155,9 +155,21 @@ def set_key(text):
         "valid until " + account["end_date"][:10] if account["end_date"] else parsed["service_type"])
 
 
-@_wrap
 def refresh_account():
-    return Premium().account(refresh=True)
+    """Ask Amnezia for the subscription again. Only the network and the
+    account file are involved, never the tunnel, so it has a lock of its own:
+    a slow gateway — right after a wake-up the network is often not back yet —
+    must not hold up a connect or a disconnect. A second refresh while one is
+    running gets the cached answer instead of a second request."""
+    premium = Premium()
+    try:
+        with store.locked(wait=0.0, action="refresh", path=store.ACCOUNT_LOCK):
+            return premium.account(refresh=True)
+    except store.Busy:
+        return premium.account()
+    except PremiumError as error:
+        store.log("refresh_account failed: %s" % error)
+        raise ActionError(str(error))
 
 
 @_wrap

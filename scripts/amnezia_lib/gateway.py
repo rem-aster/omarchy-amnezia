@@ -23,6 +23,7 @@ import json
 import os
 import random
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -42,7 +43,11 @@ PEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateway-pub
 REQUEST_TIMEOUT = 15
 LIST_TIMEOUT = 6
 HEALTH_TIMEOUT = 2
-CALL_DEADLINE = 60
+# The whole call, every gateway and list included. Each request gets what is
+# left of it as its own timeout, and the call itself runs on a thread that is
+# abandoned at the deadline, because a name lookup has no timeout of its own
+# and can hang on a network that is not back yet after a wake-up.
+CALL_DEADLINE = 45
 MAX_ANSWER_BYTES = 4 * 1024 * 1024
 PROXY_CACHE_TTL = 6 * 3600
 
@@ -74,6 +79,10 @@ def _b64(data):
     return base64.b64encode(data).decode("ascii")
 
 
+class _OutOfTime(Exception):
+    pass
+
+
 class Gateway:
     def __init__(self, cache_path=None, log=None):
         self.cache_path = cache_path
@@ -81,6 +90,16 @@ class Gateway:
         self.pem = _read_pem()
         self.public_key = crypto.load_rsa_public_key(self.pem.decode("ascii"))
         self._ssl = ssl.create_default_context()
+        self._deadline = None
+
+    def _budget(self, limit):
+        """`limit`, or what is left of the call's deadline if that is less."""
+        if self._deadline is None:
+            return limit
+        left = self._deadline - time.monotonic()
+        if left < 0.5:
+            raise _OutOfTime()
+        return min(limit, left)
 
     # -------------------------------------------------------------- transport
 
@@ -116,7 +135,7 @@ class Gateway:
         url = base.rstrip("/") + "/" + path.lstrip("/")
         headers = {"Content-Type": "application/json", "X-Client-Request-ID": str(uuid.uuid4())}
         try:
-            code, raw = self._http(url, body, REQUEST_TIMEOUT, headers)
+            code, raw = self._http(url, body, self._budget(REQUEST_TIMEOUT), headers)
         except (OSError, ValueError) as error:
             self.log("gateway %s: %s" % (base, error))
             return None, False
@@ -202,7 +221,7 @@ class Gateway:
             candidates.append(base + "endpoints.json")
         for url in candidates:
             try:
-                code, raw = self._http(url, None, LIST_TIMEOUT)
+                code, raw = self._http(url, None, self._budget(LIST_TIMEOUT))
                 if code != 200:
                     continue
                 urls = self._decrypt_list(raw)
@@ -216,7 +235,7 @@ class Gateway:
 
     def _healthy(self, base):
         try:
-            code, _ = self._http(base.rstrip("/") + "/lmbd-health", None, HEALTH_TIMEOUT)
+            code, _ = self._http(base.rstrip("/") + "/lmbd-health", None, self._budget(HEALTH_TIMEOUT))
         except (OSError, ValueError):
             return False
         return 200 <= code < 300
@@ -225,43 +244,66 @@ class Gateway:
 
     def post(self, path, payload):
         """The decrypted answer of `path` (e.g. "v1/config"). Raises
-        GatewayError when no gateway gave a usable answer, or when the API
-        refused the request (status >= 300)."""
+        GatewayError when no gateway gave a usable answer in time, or when the
+        API refused the request (status >= 300)."""
+        outcome = {}
+
+        def work():
+            try:
+                outcome["answer"] = self._post(path, payload)
+            except BaseException as error:  # handed to the caller below
+                outcome["error"] = error
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        worker.join(CALL_DEADLINE + 5)
+        if worker.is_alive():
+            self.log("gateway: %s still hanging after %ds, abandoned" % (path, CALL_DEADLINE + 5))
+            raise GatewayError("Amnezia's gateway did not answer in time — check the connection, "
+                               "or try again in a minute")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["answer"]
+
+    def _post(self, path, payload):
         body, key, iv = self._encrypt_request(payload)
-        deadline = time.monotonic() + CALL_DEADLINE
-        answer, final = self._try(MAIN_GATEWAY, path, body, key, iv)
-        last = answer
-        if not final:
-            cache = self._cache()
-            service = str(payload.get("service_type") or "")
-            country = str(payload.get("user_country_code") or "")
-            tried = set()
-            order = []
-            if cache.get("working"):
-                order.append(cache["working"])
-            urls = self.proxy_urls(service, country)
-            random.shuffle(urls)
-            order += urls
-            for base in order:
-                if base in tried:
-                    continue
-                if time.monotonic() > deadline:
-                    self.log("gateway: gave up after %ds" % CALL_DEADLINE)
-                    break
-                tried.add(base)
-                # The app's own shortcut: a fallback that does not answer its
-                # health check within a moment is not worth a full request.
-                if base != cache.get("working") and not self._healthy(base):
-                    continue
-                answer, final = self._try(base, path, body, key, iv)
-                if answer is not None:
-                    last = answer
-                if final:
-                    if cache.get("working") != base:
-                        cache = self._cache()
-                        cache["working"] = base
-                        self._save_cache(cache)
-                    break
+        self._deadline = time.monotonic() + CALL_DEADLINE
+        last = None
+        try:
+            answer, final = self._try(MAIN_GATEWAY, path, body, key, iv)
+            last = answer
+            if not final:
+                cache = self._cache()
+                service = str(payload.get("service_type") or "")
+                country = str(payload.get("user_country_code") or "")
+                tried = set()
+                order = []
+                if cache.get("working"):
+                    order.append(cache["working"])
+                urls = self.proxy_urls(service, country)
+                random.shuffle(urls)
+                order += urls
+                for base in order:
+                    if base in tried:
+                        continue
+                    tried.add(base)
+                    # The app's own shortcut: a fallback that does not answer
+                    # its health check within a moment is not worth a request.
+                    if base != cache.get("working") and not self._healthy(base):
+                        continue
+                    answer, final = self._try(base, path, body, key, iv)
+                    if answer is not None:
+                        last = answer
+                    if final:
+                        if cache.get("working") != base:
+                            cache = self._cache()
+                            cache["working"] = base
+                            self._save_cache(cache)
+                        break
+        except _OutOfTime:
+            self.log("gateway: gave up on %s after %ds" % (path, CALL_DEADLINE))
+        finally:
+            self._deadline = None
         if last is None:
             raise GatewayError("no Amnezia gateway answered — check the connection, or try again in a minute")
         status = last.pop("__status", 200)
