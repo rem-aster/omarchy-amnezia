@@ -32,6 +32,9 @@ from . import store
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT_HELPER = os.path.join(SCRIPTS, "amnezia-root")
 
+# How long a privileged step may take, password prompt included.
+ROOT_TIMEOUT = 240
+
 AWG_IFACE = "amnezia"        # awg-quick names the interface after the file
 VLESS_IFACE = "amnvless"
 VLESS_UNIT = "omarchy-amnezia-vless"
@@ -298,7 +301,14 @@ def run_root(args):
         os.chmod(ROOT_HELPER, 0o755)
     except OSError:
         pass
-    result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=ROOT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # A password dialog nobody answered — after a suspend the agent's
+        # window can be gone while pkexec still waits for it. Waiting on
+        # would hold every other action back.
+        raise TunnelError("the password prompt was not answered in %d minutes — try again" % (ROOT_TIMEOUT // 60))
     if result.returncode == 0:
         return result.stdout
     text = (result.stderr or result.stdout or "").strip()

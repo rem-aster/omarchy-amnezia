@@ -4,6 +4,7 @@ runs these — `state --json` to draw, the verbs to act."""
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -207,7 +208,37 @@ def cmd_doctor(_args):
     return 1 if problems else 0
 
 
+# Hard ceilings, whatever hangs underneath: a read of local state, and an
+# action (a gateway call, a password prompt and the tunnel coming up). An
+# action that hits it exits and lets the lock go, instead of sitting on it.
+READ_LIMIT = 20
+ACTION_LIMIT = 360
+
+
+class _Expired(BaseException):
+    """Raised by the alarm; a BaseException so no `except OSError` along the
+    way can swallow it."""
+
+
+def _expire(signum, frame):
+    raise _Expired()
+
+
 def main(argv):
+    command = argv[0] if argv else ""
+    limit = READ_LIMIT if command in ("", "status", "state", "help", "-h", "--help") else ACTION_LIMIT
+    previous = signal.signal(signal.SIGALRM, _expire)
+    signal.alarm(limit)
+    try:
+        return _dispatch(argv)
+    except _Expired:
+        return fail("gave up after %ds — try again" % limit)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _dispatch(argv):
     command = argv[0] if argv else ""
     args = argv[1:]
     if command in ("-h", "--help", "help"):

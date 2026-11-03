@@ -58,6 +58,8 @@ Like the app, the plugin is one **device** of your subscription: it makes an ins
 
 One tunnel at a time; connecting one takes the other down. There is no kill switch.
 
+Nothing waits for ever, which matters after a suspend: a gateway call gives up after 45 seconds, an unanswered password prompt after four minutes, and any command after six. An action still holding the lock past that — one the machine went to sleep in the middle of — is stopped by the next one, and the panel stops processes it started before the sleep as soon as it wakes. Refreshing the account never blocks connecting or disconnecting.
+
 ## Files
 
 | Path | What |

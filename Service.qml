@@ -63,6 +63,22 @@ Item {
   property real lastTx: -1
   property string sampledIface: ""
 
+  // When each process was started (wall clock, ms) and why the watchdog
+  // stopped one, so its exit can say so. The wall clock keeps counting through
+  // a suspend: a process started before the machine slept is old by the time
+  // it wakes, and the watchdog's first look stops it.
+  property var started: ({})
+  property var stopped: ({})
+  property var terminated: ({})
+  readonly property var limits: ({
+    state: 25000,       // `state` gives up by itself after 20 s
+    account: 75000,     // a gateway call has 45 s
+    renewal: 75000,
+    control: 400000,    // an action gives up after 6 min (cli.ACTION_LIMIT)
+    traffic: 5000
+  })
+  property double lastPoll: Date.now()
+
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
@@ -71,6 +87,8 @@ Item {
   function refresh() {
     if (stateProcess.running || cliPath === "") return
     stateProcess.command = ["python3", cliPath, "state"]
+    started.state = Date.now()
+    stopped.state = ""
     stateProcess.running = true
   }
 
@@ -78,6 +96,8 @@ Item {
     if (accountProcess.running || cliPath === "" || !hasKey) return
     accountRefreshing = true
     accountProcess.command = ["python3", cliPath, "refresh"]
+    started.account = Date.now()
+    stopped.account = ""
     accountProcess.running = true
   }
 
@@ -100,7 +120,12 @@ Item {
 
   // `env` carries what must not appear on a command line (the key).
   function run(args, label, desiredState, env) {
-    if (controlProcess.running || cliPath === "") return false
+    if (cliPath === "") return false
+    if (controlProcess.running) {
+      lastError = "Still busy: " + (actionStatus !== "" ? actionStatus : "the last action") + " — try again in a moment"
+      errorTimer.restart()
+      return false
+    }
     desired = desiredState === undefined ? -1 : desiredState
     actionStatus = label || ""
     lastError = ""
@@ -109,6 +134,8 @@ Item {
     if (env) for (var name in env) environment[name] = env[name]
     controlProcess.environment = environment
     controlProcess.command = ["python3", cliPath].concat(args)
+    started.control = Date.now()
+    stopped.control = ""
     controlProcess.running = true
     return true
   }
@@ -188,6 +215,8 @@ Item {
     actionStatus = "Asking Amnezia for the renewal link…"
     lastError = ""
     renewalProcess.command = ["python3", cliPath, "renewal"]
+    started.renewal = Date.now()
+    stopped.renewal = ""
     renewalProcess.running = true
   }
 
@@ -214,6 +243,8 @@ Item {
     // sysfs reports a size of 0, which a FileView reads as empty; cat reads
     // to EOF and costs a millisecond.
     trafficProcess.command = ["cat", base + "rx_bytes", base + "tx_bytes"]
+    started.traffic = Date.now()
+    stopped.traffic = ""
     trafficProcess.running = true
   }
 
@@ -238,6 +269,48 @@ Item {
     lastTx = tx
   }
 
+  // -------------------------------------------------------------- watchdog
+
+  function processes() {
+    return { state: stateProcess, account: accountProcess, control: controlProcess,
+             renewal: renewalProcess, traffic: trafficProcess }
+  }
+
+  function checkStuck() {
+    var now = Date.now()
+    var all = processes()
+    for (var name in all) {
+      var proc = all[name]
+      if (!proc.running) continue
+      var age = now - (started[name] || now)
+      if (age <= limits[name]) continue
+      if (!stopped[name]) {
+        // Asked nicely first, with the reason its exit will show.
+        stopped[name] = "Stopped a stuck " + (name === "control" ? "action" : name + " check")
+          + " after " + Model.formatDuration(age / 1000) + " — try again"
+        terminated[name] = now
+        proc.signal(15)
+      } else if (now - (terminated[name] || now) > 10000) {
+        proc.signal(9)
+      }
+    }
+  }
+
+  // Back from a suspend: whatever was optimistically shown before it is no
+  // longer true, and the tunnel may have changed under us.
+  function woke() {
+    checkStuck()
+    if (!controlProcess.running) {
+      desired = -1
+      pendingCountry = ""
+      pendingProtocol = ""
+      actionStatus = ""
+    }
+    resetTraffic()
+    settleTimer.ticks = 0
+    settleTimer.restart()
+  }
+
   // ---------------------------------------------------------------- timers
 
   Timer {
@@ -245,7 +318,20 @@ Item {
     repeat: true
     running: true
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: {
+      var now = Date.now()
+      var gap = now - root.lastPoll
+      root.lastPoll = now
+      if (gap > interval + 30000) root.woke()
+      root.refresh()
+    }
+  }
+
+  Timer {
+    interval: 5000
+    repeat: true
+    running: true
+    onTriggered: root.checkStuck()
   }
 
   // A tunnel takes a few seconds to settle after an action: look again sooner
@@ -305,7 +391,8 @@ Item {
       root.accountRefreshing = false
       if (exitCode === 0) root.applyState(accountOut.text)
       else {
-        root.lastError = Model.commandError(exitCode, accountErr.text, "")
+        root.lastError = root.stopped.account ? root.stopped.account : Model.commandError(exitCode, accountErr.text, "")
+        root.stopped.account = ""
         errorTimer.restart()
       }
     }
@@ -327,7 +414,9 @@ Item {
         root.notify(root.notice)
       } else {
         root.desired = -1
-        root.lastError = Model.commandError(exitCode, controlErr.text, controlOut.text)
+        root.lastError = root.stopped.control ? root.stopped.control
+          : Model.commandError(exitCode, controlErr.text, controlOut.text)
+        root.stopped.control = ""
         errorTimer.restart()
         root.notify(root.lastError)
       }
