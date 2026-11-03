@@ -24,7 +24,7 @@ What each protocol needs on the machine:
 | Protocol | Needs | Password prompt |
 |---|---|---|
 | AmneziaWG | the [AmneziaVPN app](https://github.com/amnezia-vpn/amnezia-client) installed — the plugin uses the service it leaves running | none |
-| AmneziaWG, without the app | `amneziawg-tools` + `amneziawg-dkms` (AUR), new enough for the AWG 2/3 options Premium configs use | each connect |
+| AmneziaWG, without the app | `amneziawg-tools`, plus `amneziawg-dkms` (the kernel module — rebuilt for each new kernel, so reboot after a kernel update) or `amneziawg-go`; all new enough for the AWG 3.1 options Premium configs use | each connect |
 | VLESS | `xray` (`sudo pacman -S xray`), a release with the TUN inbound | each connect and disconnect |
 
 `scripts/amnezia doctor` checks all of it.

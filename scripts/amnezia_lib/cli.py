@@ -185,6 +185,13 @@ def cmd_doctor(_args):
         note("no AmneziaVPN service — install the AmneziaVPN app to connect AmneziaWG without a password")
     check(bool(socket_path) or shutil.which("awg-quick") is not None, "a way to raise AmneziaWG",
           "install the AmneziaVPN app, or amneziawg-tools + amneziawg-dkms (AUR)")
+    if not socket_path and shutil.which("awg-quick"):
+        module = tunnel.awg_kernel()
+        go = shutil.which("amneziawg-go") is not None
+        check(module != "" or go,
+              "something to make the interface: amneziawg module %s, amneziawg-go %s" % (
+                  module or "not built for kernel " + os.uname().release, "found" if go else "not found"),
+              "reinstall amneziawg-dkms and reboot after a kernel update, or install amneziawg-go")
     note("backend: %s (setting: %s)" % (tunnel.awg_backend(premium.settings.get("awg_backend", "auto")) or "none",
                                         premium.settings.get("awg_backend", "auto")))
     print("VLESS")
