@@ -393,6 +393,30 @@ def iface_bytes(name):
     return read("rx"), read("tx")
 
 
+def awg_kernel():
+    """"loaded", "available" (built for this kernel, not loaded yet) or ""
+    for the amneziawg module — what awg-quick needs, unless amneziawg-go is
+    there to stand in for it."""
+    if os.path.isdir("/sys/module/amneziawg"):
+        return "loaded"
+    # DKMS runs depmod after a build, so a module built for this kernel is in
+    # its modules.dep — one read from the page cache, cheap enough for a poll.
+    release = os.uname().release
+    for root in ("/lib/modules", "/usr/lib/modules"):
+        try:
+            with open(os.path.join(root, release, "modules.dep"), "rb") as handle:
+                if b"/amneziawg.ko" in handle.read():
+                    return "available"
+        except OSError:
+            continue
+    return ""
+
+
+def awg_quick_ready():
+    """awg-quick alone is not enough: something has to make the interface."""
+    return have("awg-quick") and (awg_kernel() != "" or have("amneziawg-go"))
+
+
 def awg_backend(preference="auto"):
     preference = os.environ.get("OMARCHY_AMNEZIA_AWG_BACKEND") or preference or "auto"
     if preference == "daemon":
@@ -470,6 +494,12 @@ def up(record, awg_preference="auto"):
                 run_root(["down"])
             daemon_up(record["conf"])
         else:
+            # Said before the password prompt, not after it: awg-quick alone
+            # cannot make the interface.
+            if not awg_quick_ready():
+                raise TunnelError("no AmneziaWG here: the amneziawg kernel module is not built for kernel %s "
+                                  "(reinstall amneziawg-dkms and reboot after a kernel update) and amneziawg-go "
+                                  "is not installed — or install the AmneziaVPN app" % os.uname().release)
             if current["backend"] == "daemon":
                 daemon_down()
             store.write_private(AWG_CONFIG, record["conf"])

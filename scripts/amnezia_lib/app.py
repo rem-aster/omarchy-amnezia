@@ -272,6 +272,10 @@ def state_dict():
         "picked": {"country": premium.country, "protocol": premium.protocol},
         "awgBackend": tunnel.awg_backend(preference),
         "awgBackendSetting": preference,
+        # Only asked when awg-quick is what would run: with the AmneziaVPN
+        # service, neither matters.
+        "awgModule": tunnel.awg_kernel() if tunnel.awg_backend(preference) == "quick" else "",
+        "awgGo": tunnel.have("amneziawg-go"),
         "xray": tunnel.have("xray"),
         "pkexec": tunnel.have("pkexec"),
         "deviceId": premium.settings.get("installation_uuid") or "",

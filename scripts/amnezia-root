@@ -59,6 +59,36 @@ take_file() {
   install -m 600 -o root -g root -- "$source" "$target" || die "cannot copy $source"
 }
 
+# How the system takes per-link DNS: systemd-resolved, else openresolv's
+# resolvconf, else nothing can be done about it.
+dns_mode() {
+  if command -v resolvectl >/dev/null && systemctl is-active --quiet systemd-resolved; then
+    echo resolved
+  elif command -v resolvconf >/dev/null; then
+    echo resolvconf
+  fi
+}
+
+# point_dns <iface> <dns1> [dns2]: the link's servers become the system's.
+point_dns() {
+  local iface="$1" dns1="$2" dns2="${3:-}"
+  case "$(dns_mode)" in
+    resolved)
+      resolvectl dns "$iface" "$dns1" ${dns2:+"$dns2"} &&
+        resolvectl domain "$iface" '~.' &&
+        resolvectl default-route "$iface" yes ||
+        echo "amnezia-root: warning: could not point DNS at the tunnel" >&2
+      ;;
+    resolvconf)
+      printf 'nameserver %s\n' "$dns1" ${dns2:+"$dns2"} | resolvconf -a "$iface" -m 0 -x 2>/dev/null ||
+        echo "amnezia-root: warning: could not point DNS at the tunnel" >&2
+      ;;
+    *)
+      echo "amnezia-root: warning: no systemd-resolved or resolvconf; DNS stays as it was" >&2
+      ;;
+  esac
+}
+
 stop_vless() {
   if systemctl list-units --all --plain --no-legend "$UNIT.service" 2>/dev/null | grep -q .; then
     systemctl stop "$UNIT.service" 2>/dev/null
@@ -78,6 +108,7 @@ stop_awg() {
       ip link delete "$AWG_IFACE" 2>/dev/null
     fi
   fi
+  command -v resolvconf >/dev/null && resolvconf -d "$AWG_IFACE" -f 2>/dev/null
   rm -f -- "$STATE_DIR/$AWG_IFACE.conf"
 }
 
@@ -126,11 +157,7 @@ up_vless() {
     -p "ExecStopPost=-$ip_bin -6 route del unreachable ::/1"
     -p "ExecStopPost=-$ip_bin -6 route del unreachable 8000::/1"
   )
-  local dns_mode=""
-  if command -v resolvectl >/dev/null && systemctl is-active --quiet systemd-resolved; then
-    dns_mode="resolved"
-  elif command -v resolvconf >/dev/null; then
-    dns_mode="resolvconf"
+  if [[ $(dns_mode) == resolvconf ]]; then
     hooks+=(-p "ExecStopPost=-$(command -v resolvconf) -d $TUN -f")
   fi
 
@@ -163,34 +190,76 @@ up_vless() {
   ip -6 route replace unreachable ::/1 2>/dev/null
   ip -6 route replace unreachable 8000::/1 2>/dev/null
 
-  case "$dns_mode" in
-    resolved)
-      resolvectl dns "$TUN" "$dns1" ${dns2:+"$dns2"} &&
-        resolvectl domain "$TUN" '~.' &&
-        resolvectl default-route "$TUN" yes ||
-        echo "amnezia-root: warning: could not point DNS at the tunnel" >&2
+  point_dns "$TUN" "$dns1" "$dns2"
+  echo "up"
+}
+
+# awg-quick prints its steps, then on a failure tears the interface down —
+# and when the interface was never made, that teardown's own complaint
+# ("Cannot find device") is the last line, hiding the real one. The reason
+# is the first line that is neither a step nor that teardown.
+awg_reason() {
+  local out="$1"
+  # Past a fallback to amneziawg-go, the failed kernel attempt before it is
+  # not the reason any more.
+  if grep -q 'Falling back to slow userspace' <<<"$out"; then
+    out="$(sed -n '/Falling back to slow userspace/,$p' <<<"$out" | tail -n +2)"
+  fi
+  grep -v '^\[#\]' <<<"$out" | grep -v '^\s*$' | grep -v 'Cannot find device' | head -n 1
+}
+
+awg_hint() {
+  local reason="$1"
+  case "$reason" in
+    *"Line unrecognized"*|*"Configuration parsing error"*|*"Invalid"*|*"Unable to modify interface"*)
+      echo "the installed amneziawg-tools do not understand this config ($reason) — update amneziawg-tools and amneziawg-dkms (or amneziawg-go), or install the AmneziaVPN app"
       ;;
-    resolvconf)
-      printf 'nameserver %s\n' "$dns1" ${dns2:+"$dns2"} | resolvconf -a "$TUN" -m 0 -x 2>/dev/null ||
-        echo "amnezia-root: warning: could not point DNS at the tunnel" >&2
+    *"Unknown device type"*|*"Not supported"*|*"not supported"*)
+      echo "the kernel cannot make an AmneziaWG interface ($reason): the amneziawg module is not built for kernel $(uname -r) — reinstall amneziawg-dkms and reboot, or install amneziawg-go"
+      ;;
+    *"resolvconf"*)
+      echo "awg-quick could not set DNS ($reason)"
       ;;
     *)
-      echo "amnezia-root: warning: no systemd-resolved or resolvconf; DNS stays as it was" >&2
+      echo "awg-quick failed: ${reason:-no reason given}"
       ;;
   esac
-  echo "up"
 }
 
 up_awg() {
   local source="${1:-}"
   [[ -n $source ]] || die "usage: up-awg <file.conf>"
   command -v awg-quick >/dev/null || die "awg-quick is missing — install amneziawg-tools, or the AmneziaVPN app"
+
+  # The interface comes from the kernel module, or from amneziawg-go when
+  # there is none. awg-quick asks for the module by device type only, which
+  # a freshly built DKMS module does not always answer to; load it by name.
+  if [[ ! -e /sys/module/amneziawg ]]; then
+    modprobe amneziawg 2>/dev/null
+  fi
+  if [[ ! -e /sys/module/amneziawg ]] && ! command -v amneziawg-go >/dev/null; then
+    die "no AmneziaWG here: the amneziawg kernel module is not available for kernel $(uname -r) (reinstall amneziawg-dkms and reboot after a kernel update) and amneziawg-go is not installed — or install the AmneziaVPN app"
+  fi
+
   stop_all
   take_file "$source" "$STATE_DIR/$AWG_IFACE.conf"
+
+  # DNS is set here, the same way as for VLESS, so awg-quick never needs a
+  # `resolvconf` that the system may not have.
+  local dns dns1 dns2
+  dns="$(sed -n 's/^[[:space:]]*[Dd][Nn][Ss][[:space:]]*=[[:space:]]*//p' "$STATE_DIR/$AWG_IFACE.conf" | head -n 1)"
+  sed -i '/^[[:space:]]*[Dd][Nn][Ss][[:space:]]*=/d' "$STATE_DIR/$AWG_IFACE.conf"
+  dns1="$(cut -d, -f1 <<<"$dns" | tr -d '[:space:]')"
+  dns2="$(cut -d, -f2 -s <<<"$dns" | tr -d '[:space:]')"
+
   local out
   if ! out="$(awg-quick up "$STATE_DIR/$AWG_IFACE.conf" 2>&1)"; then
     stop_awg
-    die "awg-quick failed: $(grep -v '^\[#\]' <<<"$out" | grep -v '^\s*$' | tail -n 1)"
+    die "$(awg_hint "$(awg_reason "$out")")"
+  fi
+  if [[ -n $dns1 ]] && valid_dns "$dns1"; then
+    [[ -n $dns2 ]] && ! valid_dns "$dns2" && dns2=""
+    point_dns "$AWG_IFACE" "$dns1" "$dns2"
   fi
   echo "up"
 }

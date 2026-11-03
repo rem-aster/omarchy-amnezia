@@ -30,7 +30,7 @@ function emptyState() {
     country: "", countryName: "", flag: "", protocol: "awg", backend: "", backendLabel: "",
     rx: 0, tx: 0, since: 0, iface: "", endpoint: "", daysLeft: null,
     plan: "", description: "", picked: { country: "", protocol: "awg" },
-    awgBackend: "", awgBackendSetting: "auto", xray: false, pkexec: false, deviceId: "",
+    awgBackend: "", awgBackendSetting: "auto", awgModule: "", awgGo: false, xray: false, pkexec: false, deviceId: "",
     account: { known: false, fetchedAt: 0, endDate: "", activeDevices: 0, maxDevices: 0, renewal: false, support: {} },
     countries: [], devices: [], recent: [], configs: {}
   }
@@ -71,6 +71,8 @@ function parseState(raw) {
   s.picked = { country: clip(picked.country, 24), protocol: protocolOf(picked.protocol) }
   s.awgBackend = clip(parsed.awgBackend, 16)
   s.awgBackendSetting = clip(parsed.awgBackendSetting, 16)
+  s.awgModule = clip(parsed.awgModule, 16)
+  s.awgGo = parsed.awgGo === true
   s.xray = parsed.xray === true
   s.pkexec = parsed.pkexec === true
   s.deviceId = clip(parsed.deviceId, 36)
@@ -264,7 +266,12 @@ function protocolNote(state, protocol) {
     return { level: "warn", text: "VLESS runs Xray and asks for your password to connect and disconnect" }
   }
   if (state.awgBackend === "daemon") return { level: "ok", text: "AmneziaWG through the AmneziaVPN service — no password" }
-  if (state.awgBackend === "quick") return { level: "warn", text: "AmneziaWG through awg-quick — asks for your password" }
+  if (state.awgBackend === "quick") {
+    if (state.awgModule === "" && !state.awgGo)
+      return { level: "missing", text: "awg-quick has nothing to make the interface with: the amneziawg module is not built "
+        + "for this kernel (reinstall amneziawg-dkms, reboot) and amneziawg-go is not installed" }
+    return { level: "warn", text: "AmneziaWG through awg-quick — asks for your password" }
+  }
   return { level: "missing", text: "AmneziaWG needs the AmneziaVPN app, or amneziawg-tools" }
 }
 

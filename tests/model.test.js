@@ -83,6 +83,11 @@ test("notes say what each protocol needs", () => {
   assert.strictEqual(Model.protocolNote(Object.assign({}, base, { xray: true }), "vless").level, "warn")
   assert.strictEqual(Model.protocolNote(Object.assign({}, base, { awgBackend: "daemon" }), "awg").level, "ok")
   assert.strictEqual(Model.protocolNote(base, "awg").level, "missing")
+  const quick = Object.assign({}, base, { awgBackend: "quick" })
+  assert.strictEqual(Model.protocolNote(quick, "awg").level, "missing")
+  assert.ok(Model.protocolNote(quick, "awg").text.indexOf("amneziawg-go") >= 0)
+  assert.strictEqual(Model.protocolNote(Object.assign({}, quick, { awgModule: "available" }), "awg").level, "warn")
+  assert.strictEqual(Model.protocolNote(Object.assign({}, quick, { awgGo: true }), "awg").level, "warn")
 })
 
 test("errors read like sentences", () => {
